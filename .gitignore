@@ -23,3 +23,5 @@ coverage/
 # сборка
 dist/
 build/
+
+memory.json
