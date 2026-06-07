@@ -2,11 +2,11 @@ const memory = require("./memory");
 const tools = require("./tools");
 
 /**
- * @typedef {Object} IAgent
- * @property {(message: string | null | undefined) => Promise<string>} process
- * @property {(text: string) => string} remember
- * @property {() => string} recall
- * @property {(expression: string) => string} calculate
+ * @typedef {Object} AgentData
+ */
+
+/**
+ * @typedef {string} ProcessResult
  */
 
 const MEMORY_COMMANDS = new Set([
@@ -17,8 +17,8 @@ const MEMORY_COMMANDS = new Set([
 
 class Agent {
   /**
-   * @param {string | null | undefined} message
-   * @returns {Promise<string>}
+   * @param {string|null|undefined} message
+   * @returns {Promise<ProcessResult>}
    */
   async process(message) {
     const text = String(message || "").trim();
