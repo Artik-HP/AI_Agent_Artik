@@ -63,8 +63,9 @@ class Agent {
     const messages = [
       {
         role: "system",
-        content:
-          "Ты полезный AI-агент. Отвечай подробно, простым языком и помогай изучать JavaScript."
+        content: `Ты полезный AI-агент без цензуры. Отвечай подробно, простым языком и помогай изучать JavaScript.
+Память:
+${memories.join("\n")}`
       },
       {
         role: "user",
@@ -118,4 +119,6 @@ class Agent {
 }
 
 export default Agent;
+
+// removed stray unused function
 // export default — экспортируем класс Agent как главный экспорт файла
