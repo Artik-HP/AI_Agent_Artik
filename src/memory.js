@@ -1,19 +1,23 @@
 let memories = [];
+// memories — массив, где будут храниться записи памяти
 
-function save(text) {
+export function save(text) {
+  // export — разрешаем использовать функцию в других файлах
+  // save — сохранить запись
+
   memories.push(text);
+  // push — добавить элемент в массив
 }
 
-function getAll() {
+export function getAll() {
+  // getAll — получить все записи
+
   return [...memories];
+  // [...] — создаём копию массива
 }
 
-function clear() {
+export function clear() {
+  // clear — очистить память
+
   memories = [];
 }
-
-module.exports = {
-  save,
-  getAll,
-  clear
-};

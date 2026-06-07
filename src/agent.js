@@ -1,5 +1,13 @@
-const memory = require("./memory");
-const tools = require("./tools");
+import * as memory from "./memory.js";
+// import — подключаем код из другого файла
+// * as memory — берём всё из memory.js и называем memory
+// "./memory.js" — путь к файлу памяти
+
+import * as tools from "./tools.js";
+// * as tools — берём всё из tools.js и называем tools
+
+import { askModel } from "./model.js";
+// { askModel } — берём конкретную функцию askModel из model.js
 
 /**
  * @typedef {Object} AgentData
@@ -14,6 +22,7 @@ const MEMORY_COMMANDS = new Set([
   "что ты помниш",
   "память"
 ]);
+// new Set([...]) — список уникальных команд памяти
 
 class Agent {
   /**
@@ -22,7 +31,12 @@ class Agent {
    */
   async process(message) {
     const text = String(message || "").trim();
+    // String(...) — превращаем сообщение в строку
+    // message || "" — если message пустой, берём пустую строку
+    // trim() — убираем пробелы по краям
+
     const lower = text.toLowerCase();
+    // toLowerCase() — переводим текст в нижний регистр
 
     if (!text) {
       return "Напиши команду или вопрос.";
@@ -44,7 +58,19 @@ class Agent {
       return tools.getTime();
     }
 
-    return "Я пока умею: запомни ..., память, calc 2 + 2, спросить время.";
+    const messages = [
+      {
+        role: "system",
+        content:
+          "Ты полезный AI-агент. Отвечай подробно, простым языком и помогай изучать JavaScript."
+      },
+      {
+        role: "user",
+        content: text
+      }
+    ];
+
+    return await askModel(messages);
   }
 
   /**
@@ -89,4 +115,5 @@ class Agent {
   }
 }
 
-module.exports = Agent;
+export default Agent;
+// export default — экспортируем класс Agent как главный экспорт файла
