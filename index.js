@@ -1,7 +1,11 @@
-const { createInterface } = require("node:readline");
-const Agent = require("./src/agent");
+import { createInterface } from "node:readline";
+// импорт readline из Node.js
+
+import Agent from "./src/agent.js";
+// импортируем класс Agent
 
 const agent = new Agent();
+// создаём экземпляр агента
 
 const rl = createInterface({
   input: process.stdin,
