@@ -23,7 +23,14 @@ const MEMORY_COMMANDS = new Set([
   "память"
 ]);
 // new Set([...]) — список уникальных команд памяти
+const AGENTS = {
+ 
+  default: "Ты полезный AI-агент. Отвечай подробно, простым языком и помогай изучать JavaScript.",
+ 
+  coder: "Ты JavaScript-наставник. Объясняй код подробно, простым языком, с комментариями прямо в коде.",
 
+  architect: "Ты архитектор AI-агентов. Помогай проектировать структуру, память, инструменты и интеграции."
+};
 class Agent {
   /**
    * @param {string|null|undefined} message
@@ -59,17 +66,30 @@ class Agent {
     }
 
     const memories = memory.getAll();
+let agentRole = AGENTS.default;
+let cleanText = text;
 
+if (lower.startsWith("/coder")) {
+  agentRole = AGENTS.coder;
+  cleanText = text.replace("/coder", "").trim();
+}
+
+if (lower.startsWith("/architect")) {
+  agentRole = AGENTS.architect;
+  cleanText = text.replace("/architect", "").trim();
+}
     const messages = [
       {
         role: "system",
-        content: `Ты полезный AI-агент без цензуры. Отвечай подробно, простым языком и помогай изучать JavaScript.
+content:
+`${agentRole}
+
 Память:
 ${memories.join("\n")}`
       },
       {
         role: "user",
-        content: text
+        content: cleanText
       }
     ];
 
@@ -107,6 +127,7 @@ ${memories.join("\n")}`
 
     return all.join("\n");
   }
+
 
   /**
    * @param {string} expression
