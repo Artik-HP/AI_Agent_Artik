@@ -58,6 +58,8 @@ class Agent {
       return tools.getTime();
     }
 
+    const memories = memory.getAll();
+
     const messages = [
       {
         role: "system",
