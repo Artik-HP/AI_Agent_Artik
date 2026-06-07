@@ -1,0 +1,25 @@
+# зависимости
+node_modules/
+
+# переменные окружения
+.env
+.env.local
+.env.*
+
+# логи
+*.log
+logs/
+
+# системное
+.DS_Store
+Thumbs.db
+
+# VS Code
+.vscode/
+
+# покрытие тестов
+coverage/
+
+# сборка
+dist/
+build/
