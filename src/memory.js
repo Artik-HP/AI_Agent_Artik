@@ -1,57 +1,103 @@
 import fs from "node:fs";
-// fs — модуль Node.js для работы с файлами
+// fs — встроенный модуль Node.js для работы с файлами
 
 const MEMORY_FILE = "memory.json";
-// имя файла, где будет храниться память
+// файл, где хранится память
 
 let memories = load();
-// при запуске программы сразу загружаем память из файла
+// при запуске загружаем память из файла
 
 function load() {
-  // load — загрузить память из файла
+  // load — загрузить память
 
   if (!fs.existsSync(MEMORY_FILE)) {
-    // если файла memory.json ещё нет
+    // если файла нет
 
     return [];
-    // возвращаем пустой массив
+    // возвращаем пустую память
   }
 
   const raw = fs.readFileSync(MEMORY_FILE, "utf8");
   // читаем файл как текст
 
+  if (!raw.trim()) {
+    // если файл пустой
+
+    return [];
+  }
+
   return JSON.parse(raw);
-  // превращаем JSON-текст обратно в массив
+  // превращаем JSON-текст в массив
 }
 
 function persist() {
-  // persist — сохранить память на диск
+  // persist — сохранить память
 
   fs.writeFileSync(
     MEMORY_FILE,
     JSON.stringify(memories, null, 2),
     "utf8"
   );
-  // JSON.stringify — превращает массив в красивый JSON
 }
 
 export function save(text) {
-  memories.push(text);
-  // добавляем запись в память
+  // save — сохранить запись
 
+  memories.push(text);
   persist();
-  // сразу сохраняем в memory.json
+
+  return true;
 }
 
 export function getAll() {
+  // getAll — получить всю память
+
   return [...memories];
-  // возвращаем копию памяти
 }
 
 export function clear() {
-  memories = [];
-  // очищаем массив
+  // clear — очистить память
 
+  memories = [];
   persist();
-  // сохраняем пустую память в файл
+
+  return true;
+}
+
+export function remove(index) {
+  // remove — удалить запись по номеру массива
+
+  if (index < 0 || index >= memories.length) {
+    return false;
+  }
+
+  memories.splice(index, 1);
+  persist();
+
+  return true;
+}
+
+export function removeByText(text) {
+  // removeByText — удалить запись по тексту
+
+  const normalizedText = String(text || "").trim().toLowerCase();
+  // нормализуем текст: строка, без пробелов, нижний регистр
+
+  if (!normalizedText) {
+    return false;
+  }
+
+  const index = memories.findIndex(
+    item => String(item).trim().toLowerCase() === normalizedText
+  );
+  // findIndex — ищет номер записи
+
+  if (index === -1) {
+    return false;
+  }
+
+  memories.splice(index, 1);
+  persist();
+
+  return true;
 }

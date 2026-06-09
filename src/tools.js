@@ -1,7 +1,20 @@
-/**
- * Возвращает текущее локальное время в виде строки.
- * @returns {string}
- */
+import crypto from "node:crypto";
+export function generateUuid() {
+  return crypto.randomUUID();
+}
+
+export function randomNumber(min = 1, max = 100) {
+  return Math.floor(
+    Math.random() * (max - min + 1)
+  ) + min;
+}
+
+export function encodeBase64(text) {
+  return Buffer
+    .from(text, "utf8")
+    .toString("base64");
+}
+
 export function getTime() {
   // export — разрешаем использовать функцию в других файлах
   // getTime — функция получения текущего времени
@@ -68,4 +81,22 @@ const result = Function(
 
     return "Не смог посчитать выражение.";
   }
+}
+
+/**
+ * Данные о погоде для города.
+ * @typedef {Object} WeatherData
+ * @property {string} city Название города
+ * @property {string} condition Текущее состояние погоды
+ * @property {number} temperature Температура
+ * @property {string} unit Единица измерения температуры
+ */
+
+/**
+ * Возвращает данные о погоде для города.
+ * @param {string} city
+ * @returns {WeatherData}
+ */
+export function weather(city) {
+  throw new Error("Function not implemented.");
 }

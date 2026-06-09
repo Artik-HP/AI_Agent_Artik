@@ -13,5 +13,8 @@
   "license": "ISC",
   "dependencies": {
     "dotenv": "^17.4.2"
+  },
+  "devDependencies": {
+    "eslint": "^10.4.1"
   }
 }

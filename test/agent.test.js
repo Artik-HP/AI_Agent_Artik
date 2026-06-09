@@ -1,8 +1,8 @@
-const assert = require("node:assert/strict");
-const test = require("node:test");
+import assert from "node:assert/strict";
+import test from "node:test";
 
-const Agent = require("../src/agent");
-const memory = require("../src/memory");
+import Agent from "../src/agent.js";
+import * as memory from "../src/memory.js";
 
 test("agent remembers and recalls text", async () => {
   memory.clear();
