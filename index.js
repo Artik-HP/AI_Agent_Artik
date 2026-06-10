@@ -1,24 +1,39 @@
+import "dotenv/config";
+// загружаем .env
+
 import { createInterface } from "node:readline";
-// импорт readline из Node.js
+// createInterface — консольный ввод
 
 import Agent from "./src/agent.js";
-// импортируем класс Agent
+// наш агент
 
-const agent = new Agent();
-// создаём экземпляр агента
+import { startTelegramBot } from "./src/telegram.js";
+// запуск Telegram
 
-const rl = createInterface({
-  input: process.stdin,
-  output: process.stdout
-});
+const isTelegramMode = process.argv.includes("--telegram");
+// проверяем, есть ли флаг --telegram
 
-const isInteractive = Boolean(process.stdin.isTTY);
+if (isTelegramMode) {
+  await startTelegramBot();
+  // запускаем только Telegram
 
-async function main() {
-  if (isInteractive) {
-    rl.setPrompt("Ты: ");
-    rl.prompt();
-  }
+  process.stdin.resume();
+  // держим процесс живым
+} else {
+  await startCli();
+  // иначе запускаем только консоль
+}
+
+async function startCli() {
+  const agent = new Agent();
+
+  const rl = createInterface({
+    input: process.stdin,
+    output: process.stdout
+  });
+
+  rl.setPrompt("Ты: ");
+  rl.prompt();
 
   for await (const message of rl) {
     const command = message.trim().toLowerCase();
@@ -34,13 +49,8 @@ async function main() {
       console.error("Агент: Ошибка:", error.message);
     }
 
-    if (isInteractive) {
-      rl.prompt();
-    }
+    rl.prompt();
   }
-}
 
-main().catch((error) => {
-  console.error("Агент: Ошибка:", error.message);
-  process.exitCode = 1;
-});
+  rl.close();
+}

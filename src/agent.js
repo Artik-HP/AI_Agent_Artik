@@ -42,6 +42,10 @@ import { getWeather } from "./tools/weather.js";
  */
 
 /**
+ * Тип ролей агентов
+ * @typedef {Record<string, string>} AgentRoles
+ */
+/**
  * @interface ToolsModule
  * @property {(expression: string) => number|string} calculate
  * @property {() => string} getTime
@@ -86,7 +90,8 @@ const HELP_TEXT = [
   "/uuid — сгенерировать UUID",
   "/random — сгенерировать случайное число от 0 до 1",
   "/base64 [текст] — закодировать текст в Base64",
-  "/search [запрос] — исследовательский режим"
+  "/search [запрос] — исследовательский режим",
+  "/search-web [запрос] — будущий поиск в интернете"
 ].join("\n");
 
 class Agent {
@@ -119,6 +124,27 @@ class Agent {
     })
     .join("\n\n");
 }
+
+/**
+ * @param {string|undefined} query
+ * @returns {Promise<string>}
+ */
+async searchWeb(query) {
+  // searchWeb — будущий настоящий интернет-поиск
+
+  if (!query) {
+    return "Напиши запрос. Например: /search-web новости OpenAI";
+  }
+
+  return [
+    "Интернет-поиск пока не подключён.",
+    "",
+    `Запрос: ${query}`,
+    "",
+    "Следующий шаг: подключить Brave Search API, Tavily или SerpAPI."
+  ].join("\n");
+}
+
   /**
    * @param {string|undefined} message
    * @returns {Promise<string>}
@@ -150,16 +176,16 @@ class Agent {
 
     if (lower === "/context") {
       return this.showContext();
-}
+    }
 
-if (lower === "/tools") {
-  return this.showTools();
-}
+    if (lower === "/tools") {
+      return this.showTools();
+    }
 
     if (lower === "/context clear") {
       this.conversationHistory = [];
       return "История текущего диалога очищена.";
-}
+    }
 
     if (lower === "/history") {
       return this.history();
@@ -167,7 +193,7 @@ if (lower === "/tools") {
 
     if (lower === "/remember") {
       return this.rememberLastMessage();
-}
+    }
 
     if (lower.startsWith("/forget ")) {
       return this.forget(text);
@@ -190,22 +216,25 @@ if (lower === "/tools") {
     }
 
     if (lower === "/uuid") {
-  return tools.generateUuid();
+      return tools.generateUuid();
     }
 
     if (lower === "/random") {
-  return String(
+      return String(
     tools.randomNumber());
-     }
+    }
+
+    if (lower.startsWith("/search-web ")) {
+      return await this.searchWeb(text.slice(12).trim());
+    }
 
      if (lower.startsWith("/base64 ")) {
-  const textToEncode =
+       const textToEncode =
     text.slice(8).trim();
 
   return tools.encodeBase64(
-    textToEncode
-  );
-}
+    textToEncode );
+    }
 
     if (lower.startsWith("/weather ")) {
       return await this.weather(text.slice(9).trim());
