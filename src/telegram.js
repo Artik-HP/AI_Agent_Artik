@@ -1,53 +1,71 @@
 import { Telegraf } from "telegraf";
-// Telegraf — библиотека для Telegram-ботов
-
 import Agent from "./agent.js";
+import { splitMessage }
+  from "./utils/splitMessage.js";
 
-
-export async function startTelegramBot() {
-  console.log("startTelegramBot called");
-
-  const token = process.env.TELEGRAM_BOT_TOKEN;
-
-  console.log("Token exists:", !!token);
-
-  if (!token) {
-    throw new Error("TELEGRAM_BOT_TOKEN не найден в .env");
-  }
-
-  const bot = new Telegraf(token);
 const agents = new Map();
-// Map — хранилище: chatId → Agent
 
 function getAgent(chatId) {
   if (!agents.has(chatId)) {
-    agents.set(chatId, new Agent());
+    agents.set(chatId, new Agent(chatId));
   }
 
   return agents.get(chatId);
 }
+
+export async function startTelegramBot() {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+
+  if (!token) {
+    throw new Error(
+      "TELEGRAM_BOT_TOKEN не найден"
+    );
+  }
+
+  const bot = new Telegraf(token);
+
   bot.start(ctx => {
     return ctx.reply(
-      "Привет! Я AI-агент. Напиши /help, чтобы увидеть команды."
+      "Привет! Я AI_Agent_JS 🤖"
     );
   });
 
   bot.on("text", async ctx => {
-    console.log("Telegram message:", ctx.message.text);
-
+    const chatId = ctx.chat.id;
     const userText = ctx.message.text;
 
+    console.log(
+      "Chat:",
+      chatId,
+      "Text:",
+      userText
+    );
+
     try {
-      const chatId = ctx.chat.id;
       const agent = getAgent(chatId);
-      const answer = await agent.process(userText);  
-      return ctx.reply(answer);
-    } catch (error) {
-      return ctx.reply("Ошибка: " + String(error.message || error));
+
+      const answer =
+        await agent.process(userText);
+
+const parts = splitMessage(answer);
+
+for (const part of parts) {
+  await ctx.reply(part);
+}
+
+} catch (error) {
+      console.error(error);
+
+      await ctx.reply(
+        "Ошибка: " +
+        String(error.message || error)
+      );
     }
   });
 
-  console.log("Launching bot...");
   await bot.launch();
-  console.log("Telegram bot started");
+
+  console.log(
+    "Telegram bot started"
+  );
 }

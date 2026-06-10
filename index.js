@@ -1,56 +1,109 @@
+console.log("INDEX STARTED", process.argv);
 import "dotenv/config";
-// загружаем .env
 
 import { createInterface } from "node:readline";
-// createInterface — консольный ввод
+import { stdin as input, stdout as output } from "node:process";
 
 import Agent from "./src/agent.js";
-// наш агент
-
 import { startTelegramBot } from "./src/telegram.js";
-// запуск Telegram
 
-const isTelegramMode = process.argv.includes("--telegram");
-// проверяем, есть ли флаг --telegram
+/**
+ * @typedef {Object} ErrorResponse
+ * @property {string} message
+ */
 
-if (isTelegramMode) {
-  await startTelegramBot();
-  // запускаем только Telegram
+/**
+ * @typedef {Object} CLIState
+ * @property {Agent} agent
+ * @property {import('node:readline').Interface} rl
+ * @property {boolean} isInteractive
+ */
 
-  process.stdin.resume();
-  // держим процесс живым
-} else {
-  await startCli();
-  // иначе запускаем только консоль
-}
+/** @type {string} */
+const TELEGRAM_FLAG = "--telegram";
+/** @type {Set<string>} */
+const EXIT_COMMANDS = new Set(["exit", "quit", "выход"]);
 
-async function startCli() {
-  const agent = new Agent();
-
-  const rl = createInterface({
-    input: process.stdin,
-    output: process.stdout
-  });
-
-  rl.setPrompt("Ты: ");
-  rl.prompt();
-
-  for await (const message of rl) {
-    const command = message.trim().toLowerCase();
-
-    if (command === "exit" || command === "выход") {
-      break;
-    }
-
-    try {
-      const reply = await agent.process(message);
-      console.log("Агент:", reply);
-    } catch (error) {
-      console.error("Агент: Ошибка:", error.message);
-    }
-
-    rl.prompt();
+/**
+ * @param {unknown} error
+ * @returns {string}
+ */
+function getErrorMessage(error) {
+  if (error instanceof Error) {
+    return error.message;
   }
 
-  rl.close();
+  return String(error);
 }
+
+async function main() {
+  if (process.argv.includes(TELEGRAM_FLAG)) {
+    await runTelegramBot();
+    return;
+  }
+
+  await runCli();
+}
+
+async function runTelegramBot() {
+  await startTelegramBot();
+  process.stdin.resume();
+}
+
+async function runCli() {
+  const agent = new Agent();
+  const rl = createInterface({
+    input,
+    output,
+    prompt: "Ты: "
+  });
+  const isInteractive = Boolean(input.isTTY && output.isTTY);
+
+  try {
+    if (isInteractive) {
+      console.log("AI Agent запущен. Напиши вопрос или команду. Для выхода: exit");
+      rl.prompt();
+    }
+
+    for await (const message of rl) {
+      const command = message.trim().toLowerCase();
+
+      if (EXIT_COMMANDS.has(command)) {
+        if (isInteractive) {
+          console.log("Пока.");
+        }
+        break;
+      }
+
+      if (!command) {
+        if (isInteractive) {
+          rl.prompt();
+        }
+        continue;
+      }
+
+      try {
+        const reply = await agent.process(message);
+        console.log(`Агент: ${reply}`);
+      } catch (error) {
+        console.error(`Агент: Ошибка: ${getErrorMessage(error)}`);
+      }
+
+      if (isInteractive) {
+        rl.prompt();
+      }
+    }
+  } finally {
+    rl.close();
+  }
+}
+
+/**
+ * @param {unknown} error
+ * @returns {string}
+ */
+
+main().catch(error => {
+  console.error(`Ошибка запуска: ${getErrorMessage(error)}`);
+  process.exitCode = 1;
+});

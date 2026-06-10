@@ -1,102 +1,132 @@
 import fs from "node:fs";
-// fs — встроенный модуль Node.js для работы с файлами
 
 const MEMORY_FILE = "memory.json";
-// файл, где хранится память
 
-let memories = load();
-// при запуске загружаем память из файла
+let store = load();
+// store — объект всей памяти
 
+/**
+ * @returns {Object<string, string[]>}
+ */
 function load() {
-  // load — загрузить память
-
   if (!fs.existsSync(MEMORY_FILE)) {
-    // если файла нет
-
-    return [];
-    // возвращаем пустую память
+    return {};
   }
 
   const raw = fs.readFileSync(MEMORY_FILE, "utf8");
-  // читаем файл как текст
 
   if (!raw.trim()) {
-    // если файл пустой
-
-    return [];
+    return {};
   }
 
   return JSON.parse(raw);
-  // превращаем JSON-текст в массив
 }
 
+/**
+ * @returns {void}
+ */
 function persist() {
-  // persist — сохранить память
-
   fs.writeFileSync(
     MEMORY_FILE,
-    JSON.stringify(memories, null, 2),
+    JSON.stringify(store, null, 2),
     "utf8"
   );
 }
 
-export function save(text) {
-  // save — сохранить запись
+/**
+ * @param {string | number} chatId
+ * @returns {string}
+ */
+function getKey(chatId = "default") {
+  return String(chatId);
+}
 
-  memories.push(text);
+/**
+ * @param {string} text
+ * @param {string | number} chatId
+ * @returns {boolean}
+ */
+export function save(text, chatId = "default") {
+  const key = getKey(chatId);
+
+  if (!store[key]) {
+    store[key] = [];
+  }
+
+  store[key].push(text);
   persist();
 
   return true;
 }
 
-export function getAll() {
-  // getAll — получить всю память
+/**
+ * @param {string | number} chatId
+ * @returns {string[]}
+ */
+export function getAll(chatId = "default") {
+  const key = getKey(chatId);
 
-  return [...memories];
+  return [...(store[key] || [])];
 }
 
-export function clear() {
-  // clear — очистить память
+/**
+ * @param {string | number} chatId
+ * @returns {boolean}
+ */
+export function clear(chatId = "default") {
+  const key = getKey(chatId);
 
-  memories = [];
+  store[key] = [];
   persist();
 
   return true;
 }
 
-export function remove(index) {
-  // remove — удалить запись по номеру массива
+/**
+ * @param {number} index
+ * @param {string | number} chatId
+ * @returns {boolean}
+ */
+export function remove(index, chatId = "default") {
+  const key = getKey(chatId);
+  const memories = store[key] || [];
 
   if (index < 0 || index >= memories.length) {
     return false;
   }
 
   memories.splice(index, 1);
+  store[key] = memories;
   persist();
 
   return true;
 }
 
-export function removeByText(text) {
-  // removeByText — удалить запись по тексту
+/**
+ * @param {string} text
+ * @param {string | number} chatId
+ * @returns {boolean}
+ */
+export function removeByText(text, chatId = "default") {
+  const key = getKey(chatId);
+  const memories = store[key] || [];
 
   const normalizedText = String(text || "").trim().toLowerCase();
-  // нормализуем текст: строка, без пробелов, нижний регистр
 
   if (!normalizedText) {
     return false;
   }
 
   const index = memories.findIndex(
-    item => String(item).trim().toLowerCase() === normalizedText
+    (item) => String(item).trim().toLowerCase() === normalizedText
   );
-  // findIndex — ищет номер записи
 
   if (index === -1) {
     return false;
   }
 
   memories.splice(index, 1);
+  store[key] = memories;
   persist();
 
   return true;

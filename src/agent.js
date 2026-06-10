@@ -1,6 +1,8 @@
+// @ts-nocheck
+import { getNews } from "./tools/news.js";
 import * as memory from "./memory.js";
-// memory — модуль памяти
-
+import { searchYouTube } from "./tools/youtube.js";
+import { searchWeb } from "./tools/search.js";
 import * as tools from "./tools.js";
 // tools — модуль инструментов
 
@@ -14,6 +16,7 @@ import architect from "./agents/architect.js";
 // architect — системный промпт архитектора
 
 import { getWeather } from "./tools/weather.js";
+
 
 /**
  * @typedef {"system" | "user" | "assistant"} Role
@@ -86,12 +89,16 @@ const HELP_TEXT = [
   "память — вывести память",
   "calc [выражение] — калькулятор",
   "время — текущее время",
+  "/whoami — показать Chat ID",
+  "/stats — показать статистику",
+  "/agent — показать текущий режим агента",
   "/weather [город] — погода в городе",
+  "/youtube [запрос] — поиск видео на YouTube",
   "/uuid — сгенерировать UUID",
   "/random — сгенерировать случайное число от 0 до 1",
   "/base64 [текст] — закодировать текст в Base64",
-  "/search [запрос] — исследовательский режим",
-  "/search-web [запрос] — будущий поиск в интернете"
+  "/search [запрос] — поиск в интернете",
+  "/news [тема] — последние новости"
 ].join("\n");
 
 class Agent {
@@ -99,11 +106,12 @@ class Agent {
    * @type {Message[]}
    */
   conversationHistory;
-  constructor() {
-    this.conversationHistory = []; // массив истории диалога
-  }
-
-  /**
+constructor(chatId = "default") {
+  this.chatId = String(chatId);
+  this.conversationHistory = [];
+  this.currentAgent = "default";
+  // currentAgent — текущий режим агента
+}  /**
    * @returns {string}
    */
   showContext() {
@@ -170,7 +178,7 @@ async searchWeb(query) {
     }
 
     if (lower === "/clear") {
-      memory.clear();
+      memory.clear(this.chatId);
       return "Память очищена.";
     }
 
@@ -182,6 +190,13 @@ async searchWeb(query) {
       return this.showTools();
     }
 
+    if (lower.startsWith("/youtube ")) {
+      return await searchYouTube(text.slice(9).trim());
+   }
+   if (lower.startsWith("/yt ")) {
+     return await searchYouTube(text.slice(4).trim());
+   }
+
     if (lower === "/context clear") {
       this.conversationHistory = [];
       return "История текущего диалога очищена.";
@@ -189,6 +204,14 @@ async searchWeb(query) {
 
     if (lower === "/history") {
       return this.history();
+    }
+
+    
+
+    if (lower.startsWith("/news ")) {
+  const topic = text.slice(6).trim();
+
+      return await getNews(topic);
     }
 
     if (lower === "/remember") {
@@ -224,9 +247,43 @@ async searchWeb(query) {
     tools.randomNumber());
     }
 
-    if (lower.startsWith("/search-web ")) {
-      return await this.searchWeb(text.slice(12).trim());
+    if (lower === "/testlong") {
+      return "A".repeat(10000);
+   }
+
+    if (lower === "/whoami") {
+      return `Твой Chat ID: ${this.chatId}`;
     }
+
+    if (lower === "/stats") {
+  return [
+    `Chat ID: ${this.chatId}`,
+    `Память: ${memory.getAll(this.chatId).length}`,
+    `История: ${this.conversationHistory.length}`
+  ].join("\n");
+}
+
+if (lower === "/agent") {
+  return `Текущий агент: ${this.currentAgent}`;
+}
+
+if (lower.startsWith("/agent ")) {
+  const mode = text.replace("/agent", "").trim().toLowerCase();
+
+  if (!AGENTS[mode]) {
+    return [
+      "Такого агента нет.",
+      "Доступные режимы:",
+      "/agent default",
+      "/agent coder",
+      "/agent architect"
+    ].join("\n");
+  }
+
+  this.currentAgent = mode;
+
+  return `Режим агента переключён: ${mode}`;
+}
 
      if (lower.startsWith("/base64 ")) {
        const textToEncode =
@@ -239,6 +296,10 @@ async searchWeb(query) {
     if (lower.startsWith("/weather ")) {
       return await this.weather(text.slice(9).trim());
     }
+
+    if (lower.startsWith("/search ")) {
+  return await searchWeb(text.slice(8).trim());
+}
 
     return await this.askAi(text, lower);
   }
@@ -259,14 +320,10 @@ async searchWeb(query) {
    */
   async askAi(text, lower) {
     
-    const memories = memory.getAll();
+    const memories = memory.getAll(this.chatId)
 
-    let agentRole = AGENTS.default;
-    let cleanText = text;
-
-    if (lower.startsWith("/search ")) {
-       return await this.search(text.slice(8).trim());
-    }
+let agentRole = AGENTS[this.currentAgent] || AGENTS.default;
+let cleanText = text;
 
     if (lower.startsWith("/coder")) {
       agentRole = AGENTS.coder;
@@ -325,7 +382,7 @@ ${memories.join("\n")}`
     return "Напиши запрос. Например: /search что такое MCP сервер";
   }
 
-  const memories = memory.getAll();
+  const memories = memory.getAll(this.chatId);
 
   const messages = [
     {
@@ -372,7 +429,7 @@ ${memories.join("\n")}`
       return "Напиши, что именно запомнить. Например: запомни я учу JavaScript";
     }
 
-    memory.save(text);
+    memory.save(text, this.chatId);
     return "Запомнил: " + text;
   }
 
@@ -380,7 +437,7 @@ ${memories.join("\n")}`
    * @returns {string}
    */
   recall() {
-    const all = memory.getAll();
+    const all = memory.getAll(this.chatId);
 
     if (all.length === 0) {
       return "Пока ничего не помню. Мозг чистый, как новая база данных.";
@@ -393,7 +450,7 @@ ${memories.join("\n")}`
    * @returns {string}
    */
   history() {
-    const all = memory.getAll();
+    const all = memory.getAll(this.chatId);
 
     if (all.length === 0) {
       return "Память пустая.";
@@ -415,7 +472,7 @@ ${memories.join("\n")}`
 
     if (/^\d+$/.test(value)) {
       const number = Number(value);
-      const success = memory.remove(number - 1);
+      const success = memory.remove(number - 1, this.chatId);
 
       if (!success) {
         return "Запись с таким номером не найдена.";
@@ -424,7 +481,7 @@ ${memories.join("\n")}`
       return `Удалил запись №${number}`;
     }
 
-    const success = memory.removeByText(value);
+    const success = memory.removeByText(value, this.chatId);
 
     if (!success) {
       return "Такой записи не найдено.";
