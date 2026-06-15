@@ -3,8 +3,7 @@ import { getNews } from "./tools/news.js";
 import * as memory from "./memory.js";
 import { searchYouTube } from "./tools/youtube.js";
 import { searchWeb } from "./tools/search.js";
-import * as tools from "./tools.js";
-// tools — модуль инструментов
+import { tools, listTools } from "./tools/index.js";// tools — модуль инструментов
 
 import { askModel } from "./model.js";
 // askModel — функция запроса к OpenRouter
@@ -169,6 +168,10 @@ async searchWeb(query) {
       return HELP_TEXT;
     }
 
+    if (lower === "/tools") {
+  return listTools();
+    }
+
     if (lower === "/agents") {
       return [
         "Доступные агенты:",
@@ -206,8 +209,6 @@ async searchWeb(query) {
       return this.history();
     }
 
-    
-
     if (lower.startsWith("/news ")) {
   const topic = text.slice(6).trim();
 
@@ -230,13 +231,13 @@ async searchWeb(query) {
       return this.recall();
     }
 
-    if (lower.startsWith("calc")) {
-      return this.calculate(text.slice(4).trim());
-    }
-
+if (lower.startsWith("calc")) {
+  return await this.calculate(
+    text.slice(4).trim()
+  );
+}
     if (lower.includes("врем")) {
-      return tools.getTime();
-    }
+return await tools.time.run();    }
 
     if (lower === "/uuid") {
       return tools.generateUuid();
@@ -297,10 +298,11 @@ if (lower.startsWith("/agent ")) {
       return await this.weather(text.slice(9).trim());
     }
 
-    if (lower.startsWith("/search ")) {
-  return await searchWeb(text.slice(8).trim());
+if (lower.startsWith("/search ")) {
+  return await this.search(
+    text.slice(8).trim()
+  );
 }
-
     return await this.askAi(text, lower);
   }
 
@@ -375,7 +377,6 @@ ${memories.join("\n")}`
    * @param {string} query
    * @returns {Promise<string>}
    */
-  async search(query) {
   // search — исследовательский режим
 
   if (!query) {
@@ -529,29 +530,23 @@ ${memories.join("\n")}`
     return "Пока нечего запоминать.";
   }
 
-  memory.save(lastUserMessage.content);
-  // сохраняем текст в долговременную память
+memory.save(
+  lastUserMessage.content,
+  this.chatId
+);  // сохраняем текст в долговременную память
 
   return `Запомнил: ${lastUserMessage.content}`;
 }
 
   /**
    * @param {string} expression
-   * @returns {string}
+   * @returns {Promise<string>}
    */
-  calculate(expression) {
-    const result = tools.calculate(expression);
+  async calculate(expression) {
+    const result = await tools.calc.run(expression);
     return String(result);
   }
 
 }
 
 export default Agent;
-
-/**
- * @param {string} text
- * @returns {void}
- */
-function remember(text) {
-  throw new Error("Function not implemented.");
-}
