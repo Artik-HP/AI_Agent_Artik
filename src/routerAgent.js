@@ -1,14 +1,11 @@
 import { askModel } from "./model.js";
 
-/**
- * @param {string} text
- * @returns {Promise<{tool:string,input:string}>}
- */
-export async function chooseTool(text) {
-  const response = await askModel([
-    {
-      role: "system",
-      content: `
+const DEFAULT_ROUTE = {
+  tool: "none",
+  input: ""
+};
+
+const ROUTER_SYSTEM_PROMPT = `
 Ты роутер инструментов.
 
 Инструменты:
@@ -48,7 +45,17 @@ search
   "tool":"none",
   "input":""
 }
-`
+`;
+
+/**
+ * @param {string} text
+ * @returns {Promise<{tool:string,input:string}>}
+ */
+export async function chooseTool(text) {
+  const response = await askModel([
+    {
+      role: "system",
+      content: ROUTER_SYSTEM_PROMPT
     },
     {
       role: "user",
@@ -59,9 +66,6 @@ search
   try {
     return JSON.parse(response);
   } catch {
-    return {
-      tool: "none",
-      input: ""
-    };
+    return { ...DEFAULT_ROUTE };
   }
 }

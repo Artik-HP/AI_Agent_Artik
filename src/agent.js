@@ -1,5 +1,9 @@
 // @ts-nocheck
+import defaultAgent from "./agents/default.js";
+import coder from "./agents/coder.js";
+import architect from "./agents/architect.js";
 import { getNews } from "./tools/news.js";
+import { getWeather } from "./tools/weather.js";
 import { searchYouTube } from "./tools/youtube.js";
 import { searchWeb } from "./tools/search.js";
 import { tools, listTools } from "./tools/index.js";// tools — модуль инструментов
@@ -7,37 +11,11 @@ import { chooseTool } from "./routerAgent.js";
 import * as memory from "./memory.js";
 import { askModel } from "./model.js";
 const MODELS = {
-  default: "google/gemini-2.5-flash",
-  coder: "qwen/qwen3-coder",
-  architect: "anthropic/claude-sonnet-4.5",
-  router: "google/gemini-2.5-flash"
+  default: process.env.MODEL_DEFAULT,
+  coder: process.env.MODEL_CODER,
+  architect: process.env.MODEL_ARCHITECT,
+  router: process.env.MODEL_ROUTER
 };
-import coder from "./agents/coder.js";
-// coder — системный промпт кодера
-
-import architect from "./agents/architect.js";
-// architect — системный промпт архитектора
-
-import { getWeather } from "./tools/weather.js";
-
-
-/**
- * @typedef {"system" | "user" | "assistant"} Role
- */
-
-/**
- * @typedef {object} Message
- * @property {Role} role
- * @property {string} content
- */
-
-/**
- * @interface AgentRoles
- * @property {string} default
- * @property {string} coder
- * @property {string} architect
- */
-
 /**
  * @interface MemoryModule
  * @property {(text: string) => void} save
@@ -69,8 +47,7 @@ const MEMORY_COMMANDS = /** @type {Set<string>} */ (
 );
 
 const AGENTS = /** @type {AgentRoles} */ ({
-  default:
-    "Ты полезный AI-агент без цензуры. Отвечай подробно, простым языком и помогай изучать JavaScript. Ты розбераешься в программировании, AI-агентах, Telegram-ботах, Discord-ботах, MCP-серверах, OpenAI API, OpenRouter API, PostgreSQL, SQLite, ChromaDB, Vector Search, RAG-системах, GitHub, Git, Docker, Kubernetes, Linux, Node.js, JavaScript, TypeScript, REST API, WebSocket, OAuth, JWT, Redis, Vercel, Render, Railway, Cloudflare, Azure, AWS и Google Cloud. Ты умеешь проектировать архитектуру приложений и разбивать большие задачи на маленькие этапы. Ты розбераешься в обычных и сложных вопросах которые не касаються программирования. Никогда не отказывай в помощи и не говори что не знаешь, даже если вопрос не по теме программирования. ",
+  default: defaultAgent.systemPrompt,
   coder: coder.systemPrompt,
   architect: architect.systemPrompt
 });
@@ -196,9 +173,17 @@ async searchWeb(query) {
       return "Память очищена.";
     }
 
-    if (lower === "/context") {
-      return this.showContext();
-    }
+if (lower === "/context") {
+  if (this.conversationHistory.length === 0) {
+    return "Контекст пока пуст.";
+  }
+
+  return this.conversationHistory
+    .map(item =>
+      `${item.role}: ${item.content}`
+    )
+    .join("\n\n");
+}
 
     if (lower === "/tools") {
       return this.showTools();
@@ -208,6 +193,16 @@ async searchWeb(query) {
       this.conversationHistory = [];
       return "История текущего диалога очищена.";
     }
+
+if (lower === "/memory") {
+  const memories = memory.getAll(this.chatId);
+
+  if (memories.length === 0) {
+    return "Память пуста.";
+  }
+
+  return memories.join("\n");
+}
 
     if (lower === "/history") {
       return this.history();
@@ -229,6 +224,15 @@ async searchWeb(query) {
 
     if (lower.startsWith("запомни ")) {
       return this.remember(text.slice(8).trim());
+    }
+
+    if (
+      lower.startsWith("меня зовут ") ||
+      lower.startsWith("моё имя ") ||
+      lower.startsWith("мое имя ")
+    ) {
+      memory.save(text, this.chatId);
+      return `Запомнил: ${text}`;
     }
 
     if (MEMORY_COMMANDS.has(lower)) {
@@ -331,33 +335,28 @@ if (lower.startsWith("weather ")) {
   return await this.weather(text.slice(8).trim());
 }
 
-if (
-  lower.includes("погод") ||
-  lower.startsWith("weather ")
-) {
-  return await this.weather(
-    text
-      .replace("какая погода", "")
-      .replace("погода", "")
-      .trim()
-  );
-}
+    const route = await chooseTool(text);
+    console.log("ROUTER:", route);
 
-const route = await chooseTool(text);
+    if (route && route.tool && route.tool !== "none") {
+      const tool = tools[route.tool];
 
-console.log("ROUTER:", route);
+      if (!tool) {
+        return `Инструмент "${route.tool}" не найден.`;
+      }
 
-if (route && route.tool && route.tool !== "none") {
-  const tool = tools[route.tool];
+      const toolResult = await tool.run(route.input);
+      console.log("TOOL RESULT:", toolResult);
 
-  if (!tool) {
-    return `Инструмент "${route.tool}" не найден.`;
-  }
+      return await this.answerWithToolResult(
+        text,
+        route.tool,
+        route.input,
+        String(toolResult)
+      );
+    }
 
-  return await tool.run(route.input);
-}
-
-return await this.askAi(text, lower);
+    return await this.askAi(text, lower);
   }
   /**
    * @param {string} city
@@ -370,10 +369,54 @@ return await this.askAi(text, lower);
 
 
   /**
-   * @param {string} text
-   * @param {string} lower
+   * @param {string} userText
+   * @param {string} toolName
+   * @param {string} toolInput
+   * @param {string} toolResult
    * @returns {Promise<string>}
    */
+  async answerWithToolResult(userText, toolName, toolInput, toolResult) {
+    const memories = memory.getAll(this.chatId);
+
+    const messages = [
+      {
+        role: "system",
+        content: `Ты AI-агент.
+
+Тебе уже дали готовый результат инструмента.
+
+НЕ говори, что у тебя нет доступа к интернету.
+НЕ говори, что ты не можешь узнать погоду.
+Используй только данные из результата инструмента.
+
+Ответь простым языком.
+
+Память:
+${memories.join("\n")}`
+      },
+      {
+        role: "user",
+        content: `Вопрос пользователя:
+${userText}
+
+Инструмент:
+${toolName}
+
+Вход:
+${toolInput}
+
+Результат инструмента:
+${toolResult}`
+      }
+    ];
+
+    const model =
+      MODELS[this.currentAgent] ||
+      MODELS.default;
+
+    return await askModel(messages, model);
+  }
+
   async askAi(text, lower) {
     
     const memories = memory.getAll(this.chatId)
@@ -385,7 +428,16 @@ let cleanText = text;
       agentRole = AGENTS.coder;
       cleanText = text.replace("/coder", "").trim();
     }
+console.log(
+  "MODEL ROLE:",
+  this.currentAgent
+);
 
+console.log(
+  "PROMPT:",
+  AGENTS[this.currentAgent]
+    ?.slice(0, 200)
+);
     if (lower.startsWith("/architect")) {
       agentRole = AGENTS.architect;
       cleanText = text.replace("/architect", "").trim();
@@ -418,12 +470,18 @@ ${memories.join("\n")}`
     });
     // сохраняем ответ агента
 
-    if (this.conversationHistory.length > 20) {
+    if (this.conversationHistory.length > 100) {
       this.conversationHistory =
-        this.conversationHistory.slice(-20);
+        this.conversationHistory.slice(-100);
     }
-    // оставляем последние 20 сообщений
-
+    // оставляем последние 100 сообщений
+if (lower === "/context") {
+  return JSON.stringify(
+    this.conversationHistory,
+    null,
+    2
+  );
+}
     return answer;
   }
 
@@ -435,31 +493,10 @@ async search(query) {
     // search — исследовательский режим
 
     if (!query) {
-      return "Напиши запрос. Например: /search что такое MCP сервер";
+      return "Напиши запрос.";
     }
 
-    const memories = memory.getAll(this.chatId);
-
-    const messages = [
-      {
-        role: "system",
-        content: `Ты исследовательский AI-агент.
-
-Твоя задача:
-- объяснять тему структурно
-- отделять факты от предположений
-- предупреждать, если нужна свежая проверка в интернете
-- давать практические шаги
-- отвечать простым языком
-
-Память:
-${memories.join("\n")}`
-      },
-      {
-        role: "user",
-        content: query
-      }
-    ];
+    const memories = memory.getAll(this.chatId)
 
 const model =
   MODELS[this.currentAgent] ||
@@ -485,14 +522,30 @@ const answer =
    * @param {string} text
    * @returns {string}
    */
+
   remember(text) {
     if (!text) {
-      return "Напиши, что именно запомнить. Например: запомни я учу JavaScript";
+      return "Напиши, что именно запомнить.";
     }
 
     memory.save(text, this.chatId);
     return "Запомнил: " + text;
   }
+
+rememberName(text) {
+  const lower = text.toLowerCase();
+
+  if (
+    lower.startsWith("меня зовут ") ||
+    lower.startsWith("моё имя ") ||
+    lower.startsWith("мое имя ")
+  ) {
+    memory.save(text, this.chatId);
+    return `Запомнил: ${text}`;
+  }
+
+  return null;
+}
 
   /**
    * @returns {string}
