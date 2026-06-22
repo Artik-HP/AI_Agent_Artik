@@ -7,7 +7,7 @@
  */
 export function splitMessage(
   text,
-  maxLength = 4000
+  maxLength = 50000
 ) {
   const chunks = [];
 
