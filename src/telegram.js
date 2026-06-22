@@ -37,7 +37,6 @@ export async function startTelegramBot() {
   bot.on("text", async ctx => {
     console.log("TEXT FROM TELEGRAM:", ctx.message.text);
     console.log("CHAT ID:", ctx.chat.id);
-
     const chatId = ctx.chat.id;
     const userText = ctx.message.text;
 
@@ -45,9 +44,13 @@ export async function startTelegramBot() {
       const agent = getAgent(chatId);
       const answer = await agent.process(userText);
 
-      console.log("ANSWER:", answer);
+      console.log("ANSWER LENGTH:", answer.length);
 
-      const parts = splitMessage(answer);
+const parts = splitMessage(answer, 3900);
+      console.log(
+        "PARTS:",
+        parts.length
+      );
 
       for (const part of parts) {
         await ctx.reply(part);

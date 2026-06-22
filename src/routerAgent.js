@@ -1,5 +1,9 @@
 import { askModel } from "./model.js";
 
+/**
+ * @param {string} text
+ * @returns {Promise<{tool:string,input:string}>}
+ */
 export async function chooseTool(text) {
   const response = await askModel([
     {
