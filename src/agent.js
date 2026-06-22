@@ -1,13 +1,17 @@
 // @ts-nocheck
 import { getNews } from "./tools/news.js";
-import * as memory from "./memory.js";
 import { searchYouTube } from "./tools/youtube.js";
 import { searchWeb } from "./tools/search.js";
 import { tools, listTools } from "./tools/index.js";// tools — модуль инструментов
-
+import { chooseTool } from "./routerAgent.js";
+import * as memory from "./memory.js";
 import { askModel } from "./model.js";
-// askModel — функция запроса к OpenRouter
-
+const MODELS = {
+  default: "google/gemini-2.5-flash",
+  coder: "qwen/qwen3-coder",
+  architect: "anthropic/claude-sonnet-4.5",
+  router: "google/gemini-2.5-flash"
+};
 import coder from "./agents/coder.js";
 // coder — системный промпт кодера
 
@@ -159,7 +163,7 @@ async searchWeb(query) {
   async process(message) {
     const text = String(message || "").trim();
     const lower = text.toLowerCase();
-
+    
     if (!text) {
       return "Напиши команду или вопрос.";
     }
@@ -171,6 +175,13 @@ async searchWeb(query) {
     if (lower === "/tools") {
   return listTools();
     }
+
+    if (lower === "/model") {
+  return (
+    MODELS[this.currentAgent] ||
+    MODELS.default
+  );
+}
 
     if (lower === "/agents") {
       return [
@@ -192,13 +203,6 @@ async searchWeb(query) {
     if (lower === "/tools") {
       return this.showTools();
     }
-
-    if (lower.startsWith("/youtube ")) {
-      return await searchYouTube(text.slice(9).trim());
-   }
-   if (lower.startsWith("/yt ")) {
-     return await searchYouTube(text.slice(4).trim());
-   }
 
     if (lower === "/context clear") {
       this.conversationHistory = [];
@@ -231,22 +235,21 @@ async searchWeb(query) {
       return this.recall();
     }
 
-if (lower.startsWith("calc")) {
+    if (lower.startsWith("calc")) {
   return await this.calculate(
     text.slice(4).trim()
   );
 }
     if (lower.includes("врем")) {
-return await tools.time.run();    }
+      return await tools.time.run();    }
 
-    if (lower === "/uuid") {
-      return tools.generateUuid();
-    }
+if (lower === "/uuid") {
+  return await tools.uuid.run();
+}
 
-    if (lower === "/random") {
-      return String(
-    tools.randomNumber());
-    }
+if (lower === "/random") {
+  return await tools.random.run();
+}
 
     if (lower === "/testlong") {
       return "A".repeat(10000);
@@ -294,18 +297,68 @@ if (lower.startsWith("/agent ")) {
     textToEncode );
     }
 
-    if (lower.startsWith("/weather ")) {
-      return await this.weather(text.slice(9).trim());
-    }
+        if (lower.startsWith("/youtube ")) {
+      return await searchYouTube(text.slice(9).trim());
+   }
+   if (lower.startsWith("/yt ")) {
+     return await searchYouTube(text.slice(4).trim());
+   }
+
+if (
+  lower.includes("youtube") ||
+  lower.includes("ютуб") ||
+  lower.includes("видео")
+) {
+  return await tools.youtube.run(text);
+}
+
 
 if (lower.startsWith("/search ")) {
   return await this.search(
     text.slice(8).trim()
   );
 }
-    return await this.askAi(text, lower);
+
+if (
+  lower.includes("найди") ||
+  lower.includes("поиск") ||
+  lower.includes("что такое")
+) {
+  return await tools.search.run(text);
+}
+
+if (lower.startsWith("weather ")) {
+  return await this.weather(text.slice(8).trim());
+}
+
+if (
+  lower.includes("погод") ||
+  lower.startsWith("weather ")
+) {
+  return await this.weather(
+    text
+      .replace("какая погода", "")
+      .replace("погода", "")
+      .trim()
+  );
+}
+
+const route = await chooseTool(text);
+
+console.log("ROUTER:", route);
+
+if (route && route.tool && route.tool !== "none") {
+  const tool = tools[route.tool];
+
+  if (!tool) {
+    return `Инструмент "${route.tool}" не найден.`;
   }
 
+  return await tool.run(route.input);
+}
+
+return await this.askAi(text, lower);
+  }
   /**
    * @param {string} city
    * @returns {Promise<string>}
@@ -314,6 +367,7 @@ if (lower.startsWith("/search ")) {
     const result = await getWeather(city);
     return String(result ?? "Не удалось получить погоду.");
   }
+
 
   /**
    * @param {string} text
@@ -374,21 +428,22 @@ ${memories.join("\n")}`
   }
 
   /**
-   * @param {string} query
-   * @returns {Promise<string>}
-   */
-  // search — исследовательский режим
+ * @param {string} query
+ * @returns {Promise<string>}
+ */
+async search(query) {
+    // search — исследовательский режим
 
-  if (!query) {
-    return "Напиши запрос. Например: /search что такое MCP сервер";
-  }
+    if (!query) {
+      return "Напиши запрос. Например: /search что такое MCP сервер";
+    }
 
-  const memories = memory.getAll(this.chatId);
+    const memories = memory.getAll(this.chatId);
 
-  const messages = [
-    {
-      role: "system",
-      content: `Ты исследовательский AI-агент.
+    const messages = [
+      {
+        role: "system",
+        content: `Ты исследовательский AI-агент.
 
 Твоя задача:
 - объяснять тему структурно
@@ -399,27 +454,32 @@ ${memories.join("\n")}`
 
 Память:
 ${memories.join("\n")}`
-    },
-    {
+      },
+      {
+        role: "user",
+        content: query
+      }
+    ];
+
+const model =
+  MODELS[this.currentAgent] ||
+  MODELS.default;
+
+const answer =
+  await askModel(messages, model);
+
+    this.conversationHistory.push({
       role: "user",
-      content: query
-    }
-  ];
+      content: `/search ${query}`
+    });
 
-  const answer = await askModel(messages);
+    this.conversationHistory.push({
+      role: "assistant",
+      content: answer
+    });
 
-  this.conversationHistory.push({
-    role: "user",
-    content: `/search ${query}`
-  });
-
-  this.conversationHistory.push({
-    role: "assistant",
-    content: answer
-  });
-
-  return answer;
-}
+    return answer;
+  }
 
   /**
    * @param {string} text

@@ -1,20 +1,40 @@
 import crypto from "node:crypto";
+
+/**
+ * Генерирует UUID v4.
+ * @returns {string} UUID
+ */
 export function generateUuid() {
   return crypto.randomUUID();
 }
 
+/**
+ * Возвращает случайное целое число в диапазоне [min, max].
+ * @param {number} [min=1]
+ * @param {number} [max=100]
+ * @returns {number}
+ */
 export function randomNumber(min = 1, max = 100) {
   return Math.floor(
     Math.random() * (max - min + 1)
   ) + min;
 }
 
+/**
+ * Кодирует текст в Base64.
+ * @param {string} text
+ * @returns {string}
+ */
 export function encodeBase64(text) {
   return Buffer
     .from(text, "utf8")
     .toString("base64");
 }
 
+/**
+ * Возвращает текущее локальное время как строку.
+ * @returns {string}
+ */
 export function getTime() {
   // export — разрешаем использовать функцию в других файлах
   // getTime — функция получения текущего времени
@@ -29,6 +49,7 @@ export function getTime() {
  * Разрешает цифры, операторы + - * / %, скобки, точки и пробелы.
  * @type {RegExp}
  */
+/** @type {RegExp} */
 const MATH_EXPRESSION_PATTERN = /^[\d+\-*/%().\s]+$/;
 // const — создаём переменную
 // MATH_EXPRESSION_PATTERN — регулярка для проверки математического выражения

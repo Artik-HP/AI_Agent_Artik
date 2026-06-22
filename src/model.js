@@ -7,11 +7,13 @@ import "dotenv/config";
  * @param {Array<{role:string,content:string}>} messages
  * @returns {Promise<string>}
  */
-export async function askModel(messages) {
-  const apiKey = process.env.OPENROUTER_API_KEY;
+export async function askModel(
+  messages,
+  model = "google/gemini-2.5-flash"
+) {    const apiKey = process.env.OPENROUTER_API_KEY;
   // берём API-ключ
 
-  const model = process.env.OPENROUTER_MODEL;
+  const envModel = process.env.OPENROUTER_MODEL;
   // берём модель
 
   if (!apiKey) {
@@ -20,7 +22,7 @@ export async function askModel(messages) {
     );
   }
 
-  if (!model) {
+  if (!envModel) {
     throw new Error(
       "OPENROUTER_MODEL не найден в .env"
     );
@@ -37,7 +39,7 @@ export async function askModel(messages) {
       },
 
       body: JSON.stringify({
-        model,
+        model: envModel,
         messages
       })
     }

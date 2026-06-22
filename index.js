@@ -37,13 +37,18 @@ function getErrorMessage(error) {
 }
 
 async function main() {
-  if (process.argv.includes(TELEGRAM_FLAG)) {
-    await runTelegramBot();
-    return;
-  }
+  const isTelegramMode =
+    process.argv.includes(TELEGRAM_FLAG);
 
-  await runCli();
-}
+  console.log("TELEGRAM MODE:", isTelegramMode);
+
+if (isTelegramMode) {
+  console.log("RUNNING TELEGRAM BOT");
+
+  await runTelegramBot();
+
+  return;
+}}
 
 async function runTelegramBot() {
   await startTelegramBot();

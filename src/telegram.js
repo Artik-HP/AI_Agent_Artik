@@ -5,9 +5,13 @@ import { splitMessage }
 
 const agents = new Map();
 
+/**
+ * @param {string | number | undefined} chatId
+ */
 function getAgent(chatId) {
   if (!agents.has(chatId)) {
-    agents.set(chatId, new Agent(chatId));
+    const agentId = chatId !== undefined ? String(chatId) : undefined;
+    agents.set(chatId, new Agent(agentId));
   }
 
   return agents.get(chatId);
@@ -31,38 +35,33 @@ export async function startTelegramBot() {
   });
 
   bot.on("text", async ctx => {
+    console.log("TEXT FROM TELEGRAM:", ctx.message.text);
+    console.log("CHAT ID:", ctx.chat.id);
+
     const chatId = ctx.chat.id;
     const userText = ctx.message.text;
 
-    console.log(
-      "Chat:",
-      chatId,
-      "Text:",
-      userText
-    );
-
     try {
       const agent = getAgent(chatId);
+      const answer = await agent.process(userText);
 
-      const answer =
-        await agent.process(userText);
+      console.log("ANSWER:", answer);
 
-const parts = splitMessage(answer);
+      const parts = splitMessage(answer);
 
-for (const part of parts) {
-  await ctx.reply(part);
-}
+      for (const part of parts) {
+        await ctx.reply(part);
+      }
+    } catch (error) {
+      console.error("Telegram handler error:", error);
 
-} catch (error) {
-      console.error(error);
+      const message = error instanceof Error ? error.message : String(error);
 
       await ctx.reply(
-        "Ошибка: " +
-        String(error.message || error)
+        "Ошибка: " + message
       );
     }
   });
-
   await bot.launch();
 
   console.log(
