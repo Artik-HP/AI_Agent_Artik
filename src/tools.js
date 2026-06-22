@@ -116,7 +116,7 @@ const result = Function(
 /**
  * Возвращает данные о погоде для города.
  * @param {string} city
- * @returns {WeatherData}
+ * @returns {WeatherData}q
  */
 export function weather(city) {
   throw new Error("Function not implemented.");

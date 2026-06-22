@@ -2,32 +2,46 @@ import "dotenv/config";
 // автоматически загружает .env
 
 /**
+ * @typedef {Object} ChatMessage
+ * @property {"system"|"user"|"assistant"} role
+ * @property {string} content
+ */
+
+/**
+ * @typedef {Object} OpenRouterChoice
+ * @property {{content: string}} message
+ */
+
+/**
+ * @typedef {Object} OpenRouterResponse
+ * @property {OpenRouterChoice[]} choices
+ * @property {{message: string}} [error]
+ */
+
+/**
  * Отправляет сообщения в OpenRouter.
  *
- * @param {Array<{role:string,content:string}>} messages
+ * @param {ChatMessage[]} messages
+ * @param {string} [selectedModel]
  * @returns {Promise<string>}
  */
-export async function askModel(
-  messages,
-  model = "google/gemini-2.5-flash"
-) {    const apiKey = process.env.OPENROUTER_API_KEY;
-  // берём API-ключ
+export async function askModel(messages, selectedModel) {
+  const apiKey = process.env.OPENROUTER_API_KEY;
 
-  const envModel = process.env.OPENROUTER_MODEL;
-  // берём модель
+  const model =
+    selectedModel ||
+    process.env.MODEL_DEFAULT ||
+    process.env.OPENROUTER_MODEL;
 
   if (!apiKey) {
-    throw new Error(
-      "OPENROUTER_API_KEY не найден в .env"
-    );
+    throw new Error("OPENROUTER_API_KEY не найден в .env");
   }
 
-  if (!envModel) {
-    throw new Error(
-      "OPENROUTER_MODEL не найден в .env"
-    );
+  if (!model) {
+    throw new Error("Модель не найдена в .env");
   }
 
+  // дальше fetch...
   const response = await fetch(
     "https://openrouter.ai/api/v1/chat/completions",
     {
@@ -39,12 +53,13 @@ export async function askModel(
       },
 
       body: JSON.stringify({
-        model: envModel,
+        model,
         messages
       })
     }
   );
 
+  /** @type {OpenRouterResponse} */
   const data = await response.json();
 
   if (!response.ok) {
