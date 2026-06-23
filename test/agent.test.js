@@ -33,3 +33,12 @@ test("agent rejects unsafe calculations", async () => {
     "Можно считать только простые математические выражения."
   );
 });
+
+test("agent exposes codebase analyzer tool", async () => {
+  const agent = new Agent();
+
+  assert.match(
+    await agent.process("/tools"),
+    /\/codebase/
+  );
+});

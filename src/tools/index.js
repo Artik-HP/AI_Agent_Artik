@@ -6,10 +6,11 @@ import { getWeather } from "./weather.js";
 
 import { searchWeb } from "./search.js";
 // импортируем интернет-поиск
-
+import fileReader from "./fileReader.js";
 import { searchYouTube } from "./youtube.js";
 // импортируем YouTube
-
+import { analyzeCodebase } from "./codeAnalyzer.js";
+import webReader from "./webReader.js";
 /**
  * @typedef {Object} Tool
  * @property {string} description
@@ -39,12 +40,17 @@ export const tools = {
 
 uuid: {
   description: "Генерирует UUID",
-  run: async () => crypto.randomUUID()
+  run: async () => basicTools.generateUuid()
 },
 
 random: {
   description: "Случайное число от 1 до 100",
-  run: async () => String(Math.floor(Math.random() * 100) + 1)
+  run: async () => String(basicTools.randomNumber())
+},
+
+base64: {
+  description: "Кодирует текст в Base64",
+  run: async input => basicTools.encodeBase64(input ?? "")
 },
 
   search: {
@@ -52,13 +58,28 @@ random: {
     run: async input => searchWeb(input ?? "")
   },
 
+webReader: {
+  description: "Читает содержимое веб-страницы",
+  run: async input => webReader.run(input ?? "")
+},
+
 youtube: {
   description: "Ищет видео на YouTube",
   run: async input => searchYouTube(input ?? "")
-}};
+},
+
+fileReader: {
+  description: "Читает файл проекта",
+  run: async input => fileReader.run(input ?? "")
+},
+
+codebase: {
+  description: "Читает и анализирует код проекта",
+  run: async () => analyzeCodebase()
+},
+};
 
 export function listTools() {
   return Object.entries(tools)
     .map(([name, tool]) => `/${name} — ${tool.description}`)
-    .join("\n");
-}
+    .join("\n")};
