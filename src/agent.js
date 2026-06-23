@@ -11,6 +11,7 @@ import { tools, listTools } from "./tools/index.js";// tools — модуль и
 import { chooseTool } from "./routerAgent.js";
 import * as memory from "./memory.js";
 import { askModel } from "./model.js";
+import { getDatabaseStatus } from "./database.js";
 const MODELS = {
   default: process.env.MODEL_DEFAULT,
   coder: process.env.MODEL_CODER,
@@ -79,6 +80,7 @@ const AGENTS = /** @type {AgentRoles} */ ({
 const HELP_TEXT = [
   "Доступные команды:",
   "/tools — список инструментов",
+  "/write путь | текст",
   "/help — помощь",
   "/agents — список агентов",
   "/coder [вопрос] — JavaScript-наставник",
@@ -95,6 +97,7 @@ const HELP_TEXT = [
   "время — текущее время",
   "/whoami — показать Chat ID",
   "/stats — показать статистику",
+  "/db — проверить подключение PostgreSQL",
   "/agent — показать текущий режим агента",
   "/weather [город] — погода в городе",
   "/youtube [запрос] — поиск видео на YouTube",
@@ -194,7 +197,7 @@ async searchWeb(query) {
     }
 
     if (lower === "/clear") {
-      memory.clear(this.chatId);
+      await memory.clear(this.chatId);
       return "Память очищена.";
     }
 
@@ -220,7 +223,7 @@ if (lower === "/context") {
     }
 
 if (lower === "/memory") {
-  const memories = memory.getAll(this.chatId);
+  const memories = await memory.getAll(this.chatId);
 
   if (memories.length === 0) {
     return "Память пуста.";
@@ -232,7 +235,7 @@ if (lower === "/memory") {
 if (lower.startsWith("/memory search ")) {
   const query = text.replace("/memory search", "").trim().toLowerCase();
 
-  const memories = memory.getAll(this.chatId);
+  const memories = await memory.getAll(this.chatId);
 
   const found = memories.filter(item =>
     item.toLowerCase().includes(query)
@@ -278,7 +281,7 @@ if (lower.startsWith("/memory search ")) {
       lower.startsWith("моё имя ") ||
       lower.startsWith("мое имя ")
     ) {
-      memory.save(text, this.chatId);
+      await memory.save(text, this.chatId);
       return `Запомнил: ${text}`;
     }
 
@@ -311,11 +314,19 @@ if (lower === "/random") {
     }
 
     if (lower === "/stats") {
+  const memories = await memory.getAll(this.chatId);
+
   return [
     `Chat ID: ${this.chatId}`,
-    `Память: ${memory.getAll(this.chatId).length}`,
+    `Память: ${memories.length}`,
     `История: ${this.conversationHistory.length}`
   ].join("\n");
+}
+
+if (lower === "/db" || lower === "/database") {
+  const status = await getDatabaseStatus();
+
+  return status.message;
 }
 
 if (lower === "/agent") {
@@ -446,7 +457,41 @@ if (
     String(toolResult)
   );
 }
-    const route = await chooseTool(text);
+
+if (
+  lower.includes("структура проекта") ||
+  lower.includes("покажи проект") ||
+  lower.includes("дерево проекта") ||
+  lower.includes("project tree")
+) {
+  const toolResult = await tools.projectTree.run(".");
+
+  return await analyzeResults(
+    text,
+    "projectTree",
+    String(toolResult)
+  );
+}
+
+if (lower.startsWith("/write ")) {
+  const payload = text.slice(7).trim();
+
+  const [filePath, ...contentParts] = payload.split("|");
+  const content = contentParts.join("|").trim();
+
+  if (!filePath || !content) {
+    return "Формат: /write путь/файл.js | содержимое файла";
+  }
+
+  const toolResult = await tools.fileWriter.run({
+    filePath: filePath.trim(),
+    content
+  });
+
+  return String(toolResult);
+}
+
+const route = await chooseTool(text);
     console.log("ROUTER:", route);
 
     if (route && route.tool && route.tool !== "none") {
@@ -486,7 +531,7 @@ return await analyzeResults(
    * @returns {Promise<string>}
    */
   async answerWithToolResult(userText, toolName, toolInput, toolResult) {
-    const memories = memory.getAll(this.chatId);
+    const memories = await memory.getAll(this.chatId);
 
     const messages = [
       {
@@ -529,7 +574,7 @@ ${toolResult}`
 
   async askAi(text, lower) {
     
-    const memories = memory.getAll(this.chatId)
+    const memories = await memory.getAll(this.chatId)
 
 let agentRole = AGENTS[this.currentAgent] || AGENTS.default;
 let cleanText = text;
@@ -638,16 +683,16 @@ async search(query) {
    * @returns {string}
    */
 
-  remember(text) {
+  async remember(text) {
     if (!text) {
       return "Напиши, что именно запомнить.";
     }
 
-    memory.save(text, this.chatId);
+    await memory.save(text, this.chatId);
     return "Запомнил: " + text;
   }
 
-rememberName(text) {
+async rememberName(text) {
   const lower = text.toLowerCase();
 
   if (
@@ -655,7 +700,7 @@ rememberName(text) {
     lower.startsWith("моё имя ") ||
     lower.startsWith("мое имя ")
   ) {
-    memory.save(text, this.chatId);
+    await memory.save(text, this.chatId);
     return `Запомнил: ${text}`;
   }
 
@@ -665,8 +710,8 @@ rememberName(text) {
   /**
    * @returns {string}
    */
-  recall() {
-    const all = memory.getAll(this.chatId);
+  async recall() {
+    const all = await memory.getAll(this.chatId);
 
     if (all.length === 0) {
       return "Пока ничего не помню. Мозг чистый, как новая база данных.";
@@ -678,8 +723,8 @@ rememberName(text) {
   /**
    * @returns {string}
    */
-  history() {
-    const all = memory.getAll(this.chatId);
+  async history() {
+    const all = await memory.getAll(this.chatId);
 
     if (all.length === 0) {
       return "Память пустая.";
@@ -692,7 +737,7 @@ rememberName(text) {
    * @param {string} text
    * @returns {string}
    */
-  forget(text) {
+  async forget(text) {
     const value = text.replace("/forget", "").trim();
 
     if (!value) {
@@ -701,7 +746,7 @@ rememberName(text) {
 
     if (/^\d+$/.test(value)) {
       const number = Number(value);
-      const success = memory.remove(number - 1, this.chatId);
+      const success = await memory.remove(number - 1, this.chatId);
 
       if (!success) {
         return "Запись с таким номером не найдена.";
@@ -710,7 +755,7 @@ rememberName(text) {
       return `Удалил запись №${number}`;
     }
 
-    const success = memory.removeByText(value, this.chatId);
+    const success = await memory.removeByText(value, this.chatId);
 
     if (!success) {
       return "Такой записи не найдено.";
@@ -736,6 +781,7 @@ rememberName(text) {
     "/uuid",
     "/random",
     "/base64",
+    "/db",
     "/codebase"
   ].join("\n");
 }
@@ -743,7 +789,7 @@ rememberName(text) {
   /**
    * @returns {string}
    */
-  rememberLastMessage() {
+  async rememberLastMessage() {
   // rememberLastMessage — сохранить последнее сообщение пользователя из истории
 
   const lastUserMessage = [...this.conversationHistory]
@@ -759,7 +805,7 @@ rememberName(text) {
     return "Пока нечего запоминать.";
   }
 
-memory.save(
+await memory.save(
   lastUserMessage.content,
   this.chatId
 );  // сохраняем текст в долговременную память

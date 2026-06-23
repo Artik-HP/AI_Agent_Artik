@@ -4,8 +4,11 @@ import test from "node:test";
 import Agent from "../src/agent.js";
 import * as memory from "../src/memory.js";
 
+delete process.env.DATABASE_URL;
+delete process.env.DATABASE_SSL;
+
 test("agent remembers and recalls text", async () => {
-  memory.clear();
+  await memory.clear();
   const agent = new Agent();
 
   assert.equal(

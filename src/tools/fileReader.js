@@ -1,8 +1,24 @@
 import fs from "node:fs";
 import path from "node:path";
 
+/** @type {string} */
 const SAFE_ROOT = process.cwd();
 
+/**
+ * @typedef {Object} FileReaderResult
+ * @property {string} result - Result message or file content
+ */
+
+/**
+ * @typedef {Object} FileReaderTool
+ * @property {(input: string) => Promise<string>} run
+ */
+
+/**
+ * Read file from project safe root.
+ * @param {string} filePath - Path to the file to read
+ * @returns {Promise<string>} File content or error message
+ */
 export async function readFileTool(filePath) {
   const normalizedPath = String(filePath || "").trim();
 
@@ -35,7 +51,12 @@ export async function readFileTool(filePath) {
   ].join("\n");
 }
 
+/** @type {FileReaderTool} */
 export default {
+  /**
+   * @param {string} input
+   * @returns {Promise<string>}
+   */
   async run(input) {
     return await readFileTool(input);
   }
