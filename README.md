@@ -7,6 +7,7 @@
 - Отвечает на обычные вопросы через OpenRouter.
 - Работает в нескольких ролях: обычный агент, JavaScript-наставник и архитектор.
 - Запоминает пользовательские факты в долговременную память.
+- Поддерживает хранение долговременной памяти в PostgreSQL через `DATABASE_URL`.
 - Хранит краткосрочный контекст текущего диалога.
 - Выполняет простые команды: время, калькулятор, UUID, случайное число, Base64.
 - Получает погоду через `wttr.in`.
@@ -33,6 +34,18 @@ npm install
 ```env
 OPENROUTER_API_KEY=твой_ключ_openrouter
 MODEL_DEFAULT=openai/gpt-4o-mini
+```
+
+Опционально подключи PostgreSQL для долговременной памяти:
+
+```env
+DATABASE_URL=postgresql://user:password@localhost:5432/ai_agent_artik
+```
+
+Для облачных PostgreSQL-провайдеров, которым нужен SSL, добавь:
+
+```env
+DATABASE_SSL=require
 ```
 
 3. Запусти CLI-режим:
@@ -70,6 +83,8 @@ npm test
 | `MODEL_STT` | Альтернативное имя переменной для STT-модели. |
 | `OPENROUTER_STT_LANGUAGE` | Язык распознавания речи. |
 | `STT_LANGUAGE` | Альтернативное имя переменной языка STT. |
+| `DATABASE_URL` | Строка подключения PostgreSQL. Если задана, долговременная память хранится в таблице `memories`. |
+| `DATABASE_SSL` | SSL-режим PostgreSQL: `require`/`true` включает SSL, `disable`/`false` выключает. |
 
 ## Команды
 
@@ -111,6 +126,7 @@ npm test
 | `/analyze-codebase` | Альтернативная команда анализа проекта. |
 | `/whoami` | Показать Chat ID. Особенно полезно в Telegram. |
 | `/stats` | Показать Chat ID, размер памяти и размер истории. |
+| `/db` | Проверить подключение PostgreSQL или файловый fallback. |
 
 ## Естественные фразы
 
@@ -180,7 +196,9 @@ npm test
 
 ## Память
 
-Долговременная память хранится в файле `memory.json` в корне проекта. Память разделяется по `chatId`, поэтому разные Telegram-чаты получают разные наборы записей.
+Долговременная память хранится в PostgreSQL, если в `.env` задана переменная `DATABASE_URL`. При старте агент создаёт таблицу `memories`, если её ещё нет. Если `DATABASE_URL` не задана, агент автоматически использует прежний файловый fallback `memory.json` в корне проекта.
+
+Память разделяется по `chatId`, поэтому разные Telegram-чаты получают разные наборы записей.
 
 Примеры:
 
@@ -331,8 +349,9 @@ TELEGRAM_BOT_TOKEN=твой_telegram_bot_token
 │  └─ agent.test.js         # базовые тесты агента
 └─ src/
    ├─ agent.js              # главный класс Agent и обработка команд
+   ├─ database.js           # подключение PostgreSQL и миграция таблиц
    ├─ model.js              # запросы к OpenRouter Chat Completions
-   ├─ memory.js             # долговременная память в memory.json
+   ├─ memory.js             # долговременная память в PostgreSQL или memory.json
    ├─ routerAgent.js        # LLM-роутер инструментов
    ├─ resultAnalyzer.js     # анализ результатов инструментов
    ├─ telegram.js           # Telegram-интеграция через Telegraf
@@ -399,7 +418,7 @@ npm test
 - Интернет-поиск требует `TAVILY_API_KEY`.
 - YouTube-поиск требует `YOUTUBE_API_KEY`.
 - Telegram-режим требует `TELEGRAM_BOT_TOKEN`.
-- Память хранится локально в `memory.json`, без базы данных.
+- Если `DATABASE_URL` не задана, память хранится локально в `memory.json`.
 - `Codebase Analyzer` анализирует snapshot с лимитами, а не бесконечный полный проект.
 - Роутер инструментов зависит от качества ответа LLM, поэтому для важных функций есть прямые команды.
 

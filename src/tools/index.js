@@ -1,9 +1,9 @@
 import * as basicTools from "../tools.js";
 // импортируем старые инструменты: getTime, calculate
-
+import fileWriter from "./fileWriter.js";
 import { getWeather } from "./weather.js";
 // импортируем погоду
-
+import projectTree from "./projectTree.js";
 import { searchWeb } from "./search.js";
 // импортируем интернет-поиск
 import fileReader from "./fileReader.js";
@@ -11,6 +11,10 @@ import { searchYouTube } from "./youtube.js";
 // импортируем YouTube
 import { analyzeCodebase } from "./codeAnalyzer.js";
 import webReader from "./webReader.js";
+
+
+
+
 /**
  * @typedef {Object} Tool
  * @property {string} description
@@ -58,9 +62,19 @@ base64: {
     run: async input => searchWeb(input ?? "")
   },
 
+projectTree: {
+  description: "Показывает структуру проекта",
+  run: async input => projectTree.run(input ?? ".")
+},
+
 webReader: {
   description: "Читает содержимое веб-страницы",
   run: async input => webReader.run(input ?? "")
+},
+
+fileWriter: {
+  description: "Создаёт или перезаписывает файл проекта",
+  run: async input => fileWriter.run(input)
 },
 
 youtube: {

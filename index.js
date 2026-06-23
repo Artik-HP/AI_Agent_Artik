@@ -6,6 +6,10 @@ import { stdin as input, stdout as output } from "node:process";
 
 import Agent from "./src/agent.js";
 import { startTelegramBot } from "./src/telegram.js";
+import {
+  closeDatabase,
+  initDatabase
+} from "./src/database.js";
 
 /**
  * @typedef {Object} ErrorResponse
@@ -37,6 +41,9 @@ function getErrorMessage(error) {
 }
 
 async function main() {
+  const databaseStatus = await initDatabase();
+  console.log("DATABASE:", databaseStatus.message);
+
   const isTelegramMode =
     process.argv.includes(TELEGRAM_FLAG);
 
@@ -50,7 +57,11 @@ if (isTelegramMode) {
   return;
 }
 
-  await runCli();
+  try {
+    await runCli();
+  } finally {
+    await closeDatabase();
+  }
 }
 
 async function runTelegramBot() {
