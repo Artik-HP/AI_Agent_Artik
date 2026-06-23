@@ -48,7 +48,10 @@ if (isTelegramMode) {
   await runTelegramBot();
 
   return;
-}}
+}
+
+  await runCli();
+}
 
 async function runTelegramBot() {
   await startTelegramBot();

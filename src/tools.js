@@ -1,5 +1,4 @@
 import crypto from "node:crypto";
-
 /**
  * Генерирует UUID v4.
  * @returns {string} UUID

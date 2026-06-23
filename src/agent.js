@@ -5,6 +5,7 @@ import architect from "./agents/architect.js";
 import { getNews } from "./tools/news.js";
 import { getWeather } from "./tools/weather.js";
 import { searchYouTube } from "./tools/youtube.js";
+import { analyzeResults } from "./resultAnalyzer.js";
 import { searchWeb } from "./tools/search.js";
 import { tools, listTools } from "./tools/index.js";// tools — модуль инструментов
 import { chooseTool } from "./routerAgent.js";
@@ -46,6 +47,29 @@ const MEMORY_COMMANDS = /** @type {Set<string>} */ (
   ])
 );
 
+/**
+ * @param {string} lower
+ * @returns {boolean}
+ */
+function shouldAnalyzeCodebase(lower) {
+  return (
+    lower === "/codebase" ||
+    lower.startsWith("/codebase ") ||
+    lower === "/analyze-codebase" ||
+    lower.startsWith("/analyze-codebase ") ||
+    lower.includes("codebase analyzer") ||
+    lower.includes("проанализируй проект") ||
+    lower.includes("проанализируй мой проект") ||
+    lower.includes("проанализировать проект") ||
+    lower.includes("проанализировать мой проект") ||
+    lower.includes("анализ проекта") ||
+    lower.includes("анализ кодовой базы") ||
+    lower.includes("проанализируй кодовую базу") ||
+    lower.includes("ревью проекта") ||
+    lower.includes("найди ошибки в проекте")
+  );
+}
+
 const AGENTS = /** @type {AgentRoles} */ ({
   default: defaultAgent.systemPrompt,
   coder: coder.systemPrompt,
@@ -78,7 +102,8 @@ const HELP_TEXT = [
   "/random — сгенерировать случайное число от 0 до 1",
   "/base64 [текст] — закодировать текст в Base64",
   "/search [запрос] — поиск в интернете",
-  "/news [тема] — последние новости"
+  "/news [тема] — последние новости",
+  "/codebase — проанализировать кодовую базу проекта"
 ].join("\n");
 
 class Agent {
@@ -204,6 +229,24 @@ if (lower === "/memory") {
   return memories.join("\n");
 }
 
+if (lower.startsWith("/memory search ")) {
+  const query = text.replace("/memory search", "").trim().toLowerCase();
+
+  const memories = memory.getAll(this.chatId);
+
+  const found = memories.filter(item =>
+    item.toLowerCase().includes(query)
+  );
+
+  if (found.length === 0) {
+    return "В памяти ничего не найдено.";
+  }
+
+  return found
+    .map((item, index) => `${index + 1}. ${item}`)
+    .join("\n");
+}
+
     if (lower === "/history") {
       return this.history();
     }
@@ -212,6 +255,10 @@ if (lower === "/memory") {
   const topic = text.slice(6).trim();
 
       return await getNews(topic);
+    }
+
+    if (lower === "/weather" || lower.startsWith("/weather ")) {
+      return await this.weather(text.slice(8).trim());
     }
 
     if (lower === "/remember") {
@@ -275,6 +322,22 @@ if (lower === "/agent") {
   return `Текущий агент: ${this.currentAgent}`;
 }
 
+if (shouldAnalyzeCodebase(lower)) {
+  const tool = tools.codebase;
+
+  if (!tool) {
+    return `Инструмент "codebase" не найден.`;
+  }
+
+  const toolResult = await tool.run();
+
+  return await analyzeResults(
+    text,
+    "codebase",
+    String(toolResult)
+  );
+}
+
 if (lower.startsWith("/agent ")) {
   const mode = text.replace("/agent", "").trim().toLowerCase();
 
@@ -297,7 +360,7 @@ if (lower.startsWith("/agent ")) {
        const textToEncode =
     text.slice(8).trim();
 
-  return tools.encodeBase64(
+  return await tools.base64.run(
     textToEncode );
     }
 
@@ -317,7 +380,7 @@ if (
 }
 
 
-if (lower.startsWith("/search ")) {
+if (lower === "/search" || lower.startsWith("/search ")) {
   return await this.search(
     text.slice(8).trim()
   );
@@ -335,6 +398,54 @@ if (lower.startsWith("weather ")) {
   return await this.weather(text.slice(8).trim());
 }
 
+const urlMatch = text.match(/https?:\/\/\S+/i);
+
+if (
+  urlMatch &&
+  (
+    lower.includes("прочитай") ||
+    lower.includes("открой") ||
+    lower.includes("проанализируй") ||
+    lower.includes("сделай конспект") ||
+    lower.includes("сайт") ||
+    lower.includes("страниц")
+  )
+) {
+  const url = urlMatch[0];
+
+  const tool = tools.webReader;
+
+  if (!tool) {
+    return `Инструмент "webReader" не найден.`;
+  }
+
+  const toolResult = await tool.run(url);
+
+  return await analyzeResults(
+    text,
+    "webReader",
+    String(toolResult)
+  );
+}
+if (
+  lower.startsWith("прочитай файл ") ||
+  lower.startsWith("открой файл ") ||
+  lower.startsWith("покажи файл ")
+) {
+  const filePath = text
+    .replace(/^прочитай файл\s+/i, "")
+    .replace(/^открой файл\s+/i, "")
+    .replace(/^покажи файл\s+/i, "")
+    .trim();
+
+  const toolResult = await tools.fileReader.run(filePath);
+
+  return await analyzeResults(
+    text,
+    "fileReader",
+    String(toolResult)
+  );
+}
     const route = await chooseTool(text);
     console.log("ROUTER:", route);
 
@@ -345,16 +456,15 @@ if (lower.startsWith("weather ")) {
         return `Инструмент "${route.tool}" не найден.`;
       }
 
-      const toolResult = await tool.run(route.input);
-      console.log("TOOL RESULT:", toolResult);
-
-      return await this.answerWithToolResult(
-        text,
-        route.tool,
-        route.input,
-        String(toolResult)
-      );
-    }
+const toolResult = await tool.run(route.input);
+console.log("TOOL:", route.tool);
+console.log("INPUT:", route.input);
+console.log("RESULT:", String(toolResult).slice(0, 500));
+return await analyzeResults(
+  text,
+  route.tool,
+  String(toolResult)
+);    }
 
     return await this.askAi(text, lower);
   }
@@ -423,10 +533,16 @@ ${toolResult}`
 
 let agentRole = AGENTS[this.currentAgent] || AGENTS.default;
 let cleanText = text;
+let selectedModel =
+  MODELS[this.currentAgent] ||
+  MODELS.default;
 
     if (lower.startsWith("/coder")) {
       agentRole = AGENTS.coder;
       cleanText = text.replace("/coder", "").trim();
+      selectedModel =
+        MODELS.coder ||
+        selectedModel;
     }
 console.log(
   "MODEL ROLE:",
@@ -441,6 +557,9 @@ console.log(
     if (lower.startsWith("/architect")) {
       agentRole = AGENTS.architect;
       cleanText = text.replace("/architect", "").trim();
+      selectedModel =
+        MODELS.architect ||
+        selectedModel;
     }
 
     this.conversationHistory.push({
@@ -462,7 +581,10 @@ ${memories.join("\n")}`
     ]);
     // добавляем всю историю
     
-    const answer = await askModel(messages);
+    const answer = await askModel(
+      messages,
+      selectedModel
+    );
 
     this.conversationHistory.push({
       role: "assistant",
@@ -496,14 +618,7 @@ async search(query) {
       return "Напиши запрос.";
     }
 
-    const memories = memory.getAll(this.chatId)
-
-const model =
-  MODELS[this.currentAgent] ||
-  MODELS.default;
-
-const answer =
-  await askModel(messages, model);
+    const answer = await searchWeb(query);
 
     this.conversationHistory.push({
       role: "user",
@@ -620,7 +735,8 @@ rememberName(text) {
     "/forget",
     "/uuid",
     "/random",
-    "/base64"
+    "/base64",
+    "/codebase"
   ].join("\n");
 }
 
