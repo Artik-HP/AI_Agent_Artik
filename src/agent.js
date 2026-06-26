@@ -12,6 +12,7 @@ import { chooseTool } from "./routerAgent.js";
 import * as memory from "./memory.js";
 import { askModel } from "./model.js";
 import { getDatabaseStatus } from "./database.js";
+import pg from "pg";
 const MODELS = {
   default: process.env.MODEL_DEFAULT,
   coder: process.env.MODEL_CODER,
