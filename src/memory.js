@@ -1,14 +1,52 @@
 import fs from "node:fs";
 
 import {
-  initDatabase,
-  isDatabaseConfigured,
-  query
+    initDatabase,
+    isDatabaseConfigured,
+    dbQuery
 } from "./database.js";
+/**
+ * @typedef {Object<string, string[]>} MemoryStore
+ */
+
+/**
+ * @typedef {Object} MemoryRow
+ * @property {string} content
+ */
+
+/**
+ * @typedef {Object} QueryResult
+ * @property {MemoryRow[]} rows
+ * @property {number} rowCount
+ */
+
+/**
+ * @typedef {string | number} ChatId
+ */
+
+/**
+ * @typedef {Object} DatabaseMemoryRow
+ * @property {string} content
+ * @property {string} [created_at]
+ * @property {number} [id]
+ */
+
+/**
+ * @typedef {Object} QueryOptions
+ * @property {string} sql
+ * @property {(string | number)[]} params
+ */
+
+/**
+ * @typedef {Object} MemoryOptions
+ * @property {string} [filePath]
+ */
 
 const MEMORY_FILE = "memory.json";
 
+/** @type {MemoryStore} */
 let store = load();
+/** @type {boolean} */
 let databaseReady = false;
 
 /**
@@ -70,8 +108,7 @@ async function shouldUseDatabase() {
  */
 export async function save(text, chatId = "default") {
   if (await shouldUseDatabase()) {
-    await query(
-      "INSERT INTO memories (chat_id, content) VALUES ($1, $2);",
+await dbQuery(      "INSERT INTO memories (chat_id, content) VALUES ($1, $2);",
       [getKey(chatId), text]
     );
 
@@ -96,8 +133,7 @@ export async function save(text, chatId = "default") {
  */
 export async function getAll(chatId = "default") {
   if (await shouldUseDatabase()) {
-    const result = await query(
-      `
+const result = await dbQuery(      `
         SELECT content
         FROM memories
         WHERE chat_id = $1
@@ -106,7 +142,7 @@ export async function getAll(chatId = "default") {
       [getKey(chatId)]
     );
 
-    return result.rows.map(row => String(row.content));
+    return result.rows.map((row) => String(/** @type {{ content?: unknown }} */(row)?.content || ""));
   }
 
   const key = getKey(chatId);
@@ -120,8 +156,7 @@ export async function getAll(chatId = "default") {
  */
 export async function clear(chatId = "default") {
   if (await shouldUseDatabase()) {
-    await query(
-      "DELETE FROM memories WHERE chat_id = $1;",
+await dbQuery(      "DELETE FROM memories WHERE chat_id = $1;",
       [getKey(chatId)]
     );
 
@@ -147,7 +182,7 @@ export async function remove(index, chatId = "default") {
   }
 
   if (await shouldUseDatabase()) {
-    const result = await query(
+    const result = await dbQuery(
       `
         WITH target AS (
           SELECT id
@@ -165,7 +200,7 @@ export async function remove(index, chatId = "default") {
       [getKey(chatId), index]
     );
 
-    return result.rowCount > 0;
+    return (result.rowCount ?? 0) > 0;
   }
 
   const key = getKey(chatId);
@@ -195,7 +230,7 @@ export async function removeByText(text, chatId = "default") {
   }
 
   if (await shouldUseDatabase()) {
-    const result = await query(
+    const result = await dbQuery(
       `
         WITH target AS (
           SELECT id
@@ -213,7 +248,7 @@ export async function removeByText(text, chatId = "default") {
       [getKey(chatId), normalizedText]
     );
 
-    return result.rowCount > 0;
+    return (result.rowCount ?? 0) > 0;
   }
 
   const key = getKey(chatId);
@@ -232,4 +267,13 @@ export async function removeByText(text, chatId = "default") {
   persist();
 
   return true;
+}
+
+/**
+ * @param {string} arg0
+ * @param {(string | number)[]} arg1
+ * @returns {Promise<QueryResult>}
+ */
+function query(arg0, arg1) {
+  return /** @type {Promise<QueryResult>} */ (dbQuery(arg0, arg1));
 }
