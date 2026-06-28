@@ -210,7 +210,9 @@ async function handleTelegramError(ctx, error) {
 
 export async function startTelegramBot() {
   const token = process.env.TELEGRAM_BOT_TOKEN;
-
+console.log("INDEX STARTED", process.argv);
+console.log(process.argv);
+console.log(JSON.stringify(process.argv, null, 2));
   if (!token) {
     throw new Error(
       "TELEGRAM_BOT_TOKEN не найден"

@@ -4,12 +4,11 @@
   "type": "module",
   "description": "Simple CLI AI agent prototype",
   "main": "index.js",
-  "scripts": {
-    "start": "node index.js",
-    "telegram": "node index.js --telegram",
-    "test": "node --test"
-  },
-  "keywords": [],
+"scripts": {
+"start": "node index.js --telegram",
+  "test": "node --test"
+},
+ "keywords": [],
   "author": "",
   "license": "ISC",
   "dependencies": {
