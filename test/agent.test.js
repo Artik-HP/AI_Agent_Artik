@@ -45,3 +45,29 @@ test("agent exposes codebase analyzer tool", async () => {
     /\/codebase/
   );
 });
+
+test("agent exposes image drawing tool", async () => {
+  const agent = new Agent();
+
+  assert.match(
+    await agent.process("/tools"),
+    /\/draw/
+  );
+});
+
+test("agent creates image generation links", async () => {
+  const agent = new Agent();
+  const answer = await agent.process("/draw neon cat");
+
+  assert.match(answer, /Картинка готова:/);
+  assert.match(answer, /https:\/\/image\.pollinations\.ai\/prompt\/neon%20cat/);
+});
+
+test("agent switches back to default mode", async () => {
+  const agent = new Agent();
+
+  assert.equal(
+    await agent.process("/agent default"),
+    "Режим агента переключён: default"
+  );
+});

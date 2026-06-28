@@ -72,6 +72,53 @@ function shouldAnalyzeCodebase(lower) {
   );
 }
 
+/**
+ * @param {string} text
+ * @param {string} lower
+ * @returns {string|null}
+ */
+function extractDrawPrompt(text, lower) {
+  const slashCommands = [
+    "/draw",
+    "/image",
+    "/picture"
+  ];
+
+  for (const command of slashCommands) {
+    if (lower === command) {
+      return "";
+    }
+
+    if (lower.startsWith(`${command} `)) {
+      return text.slice(command.length).trim();
+    }
+  }
+
+  const naturalPrefixes = [
+    "нарисуй картинку ",
+    "нарисуй изображение ",
+    "нарисовать картинку ",
+    "нарисовать изображение ",
+    "сгенерируй картинку ",
+    "сгенерируй изображение ",
+    "создай картинку ",
+    "создай изображение ",
+    "сделай картинку ",
+    "draw ",
+    "нарисуй "
+  ];
+
+  const prefix = naturalPrefixes.find(item =>
+    lower.startsWith(item)
+  );
+
+  if (!prefix) {
+    return null;
+  }
+
+  return text.slice(prefix.length).trim();
+}
+
 const AGENTS = /** @type {AgentRoles} */ ({
   default: defaultAgent.systemPrompt,
   coder: coder.systemPrompt,
@@ -81,9 +128,11 @@ const AGENTS = /** @type {AgentRoles} */ ({
 const HELP_TEXT = [
   "Доступные команды:",
   "/tools — список инструментов",
+  "/commands — список команд",
   "/write путь | текст",
   "/help — помощь",
   "/agents — список агентов",
+  "/agent default — обычный агент",
   "/coder [вопрос] — JavaScript-наставник",
   "/architect [вопрос] — архитектор AI-агентов",
   "/history — показать память с номерами",
@@ -107,7 +156,8 @@ const HELP_TEXT = [
   "/base64 [текст] — закодировать текст в Base64",
   "/search [запрос] — поиск в интернете",
   "/news [тема] — последние новости",
-  "/codebase — проанализировать кодовую базу проекта"
+  "/codebase — проанализировать кодовую базу проекта",
+  "/draw [описание] — нарисовать картинку"
 ].join("\n");
 
 class Agent {
@@ -174,7 +224,11 @@ async searchWeb(query) {
       return "Напиши команду или вопрос.";
     }
 
-    if (lower === "/help") {
+    if (
+      lower === "/help" ||
+      lower === "/commands" ||
+      lower === "команды"
+    ) {
       return HELP_TEXT;
     }
 
@@ -192,6 +246,7 @@ async searchWeb(query) {
     if (lower === "/agents") {
       return [
         "Доступные агенты:",
+        "/agent default — обычный агент",
         "/coder — JavaScript-наставник",
         "/architect — архитектор AI-агентов"
       ].join("\n");
@@ -332,6 +387,12 @@ if (lower === "/db" || lower === "/database") {
 
 if (lower === "/agent") {
   return `Текущий агент: ${this.currentAgent}`;
+}
+
+const drawPrompt = extractDrawPrompt(text, lower);
+
+if (drawPrompt !== null) {
+  return await tools.draw.run(drawPrompt);
 }
 
 if (shouldAnalyzeCodebase(lower)) {
@@ -506,6 +567,11 @@ const toolResult = await tool.run(route.input);
 console.log("TOOL:", route.tool);
 console.log("INPUT:", route.input);
 console.log("RESULT:", String(toolResult).slice(0, 500));
+
+if (route.tool === "draw") {
+  return String(toolResult);
+}
+
 return await analyzeResults(
   text,
   route.tool,
@@ -533,7 +599,7 @@ return await analyzeResults(
    */
   async answerWithToolResult(userText, toolName, toolInput, toolResult) {
     const memories = await memory.getAll(this.chatId);
-
+    console.log("MEMORIES:", memories);
     const messages = [
       {
         role: "system",
@@ -783,7 +849,8 @@ async rememberName(text) {
     "/random",
     "/base64",
     "/db",
-    "/codebase"
+    "/codebase",
+    "/draw"
   ].join("\n");
 }
 

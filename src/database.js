@@ -1,52 +1,99 @@
-import { Pool } from 'pg';
+import { Pool } from "pg";
 
-console.log("DATABASE_URL:");
-console.log(process.env.DATABASE_URL);
+export function isDatabaseConfigured() {
+    return Boolean(process.env.DATABASE_URL);
+}
+
+export function getDatabaseStatus() {
+    return {
+        enabled: isDatabaseConfigured(),
+        provider: "Neon PostgreSQL"
+    };
+}
 
 export const db = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: {
-    rejectUnauthorized: false
-  }
+    connectionString: process.env.DATABASE_URL,
+    ssl: {
+        rejectUnauthorized: false
+    }
 });
 
 /**
- * Проверяет, настроена ли база данных.
- * @returns {boolean}
+ * Выполнить SQL-запрос
+ * @param {string} sql
+ * @param {Array<any>} params
  */
-export function isDatabaseConfigured() {
-  return Boolean(process.env.DATABASE_URL);
-}
-
-export async function initDatabase() {
-  try {
-    await db.query("SELECT NOW();");
-
-    console.log("✅ PostgreSQL подключён.");
-  } catch (err) {
-    console.error("❌ Ошибка подключения PostgreSQL");
-    console.error(err);
-  }
-}
-
-/**
- * Проверяет, указан ли DATABASE_URL.
- */
-
-/**
- * Возвращает состояние подключения к базе.
- */
-export function getDatabaseStatus() {
-  return {
-    configured: isDatabaseConfigured(),
-    connected: !!process.env.DATABASE_URL
-  };
-}
-
-export async function closeDatabase() {
-    // закрываем соединение
-}
-
 export async function dbQuery(sql, params = []) {
     return db.query(sql, params);
+}
+
+/**
+ * Проверить подключение и создать таблицы
+ */
+export async function initDatabase() {
+
+    if (!isDatabaseConfigured()) {
+        console.log("⚠ DATABASE_URL не указан. Используется memory.json");
+        return;
+    }
+
+    try {
+
+        await db.query("SELECT NOW();");
+
+        console.log("✅ PostgreSQL подключён.");
+
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS memory (
+                id SERIAL PRIMARY KEY,
+                chat_id TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT NOW()
+            );
+        `);
+
+        console.log("✅ Таблица memory готова.");
+
+    } catch (err) {
+
+        console.error("❌ Ошибка PostgreSQL");
+        console.error(err);
+
+    }
+
+}
+export async function closeDatabase() {
+    await db.end();
+    console.log("🔌 PostgreSQL отключён.");
+}
+
+await db.query(`
+CREATE TABLE IF NOT EXISTS messages (
+    id SERIAL PRIMARY KEY,
+    chat_id TEXT NOT NULL,
+    role TEXT NOT NULL,
+    text TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+`);
+
+await db.query(`
+CREATE TABLE IF NOT EXISTS memory (
+    id SERIAL PRIMARY KEY,
+    chat_id TEXT NOT NULL,
+    content TEXT NOT NULL,
+    importance INTEGER DEFAULT 1,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+`);
+console.log("✅ Таблицы готовы.");
+
+export async function saveMessage(chatId, role, text) {
+    return dbQuery(
+        `
+        INSERT INTO messages (chat_id, role, text)
+        VALUES ($1, $2, $3)
+        `,
+        [chatId, role, text]
+    );
 }

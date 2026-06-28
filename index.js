@@ -7,7 +7,6 @@ import { stdin as input, stdout as output } from "node:process";
 import Agent from "./src/agent.js";
 import { startTelegramBot } from "./src/telegram.js";
 import {
-  closeDatabase,
   initDatabase
 } from "./src/database.js";
 
@@ -59,7 +58,7 @@ if (isTelegramMode) {
   try {
     await runCli();
   } finally {
-    await closeDatabase();
+   // await closeDatabase();
   }
 }
 
