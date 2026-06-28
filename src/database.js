@@ -44,15 +44,26 @@ export async function initDatabase() {
         console.log("✅ PostgreSQL подключён.");
 
         await db.query(`
-            CREATE TABLE IF NOT EXISTS memory (
+            CREATE TABLE IF NOT EXISTS messages (
                 id SERIAL PRIMARY KEY,
                 chat_id TEXT NOT NULL,
-                content TEXT NOT NULL,
+                role TEXT NOT NULL,
+                text TEXT NOT NULL,
                 created_at TIMESTAMP DEFAULT NOW()
             );
         `);
 
-        console.log("✅ Таблица memory готова.");
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS memory (
+                id SERIAL PRIMARY KEY,
+                chat_id TEXT NOT NULL,
+                content TEXT NOT NULL,
+                importance INTEGER DEFAULT 1,
+                created_at TIMESTAMP DEFAULT NOW()
+            );
+        `);
+
+        console.log("✅ Таблицы готовы.");
 
     } catch (err) {
 
@@ -62,32 +73,31 @@ export async function initDatabase() {
     }
 
 }
+
 export async function closeDatabase() {
     await db.end();
     console.log("🔌 PostgreSQL отключён.");
 }
 
-await db.query(`
-CREATE TABLE IF NOT EXISTS messages (
-    id SERIAL PRIMARY KEY,
-    chat_id TEXT NOT NULL,
-    role TEXT NOT NULL,
-    text TEXT NOT NULL,
-    created_at TIMESTAMP DEFAULT NOW()
-);
-`);
+/**
+ * @typedef {'user' | 'assistant' | 'system'} MessageRole
+ */
 
-await db.query(`
-CREATE TABLE IF NOT EXISTS memory (
-    id SERIAL PRIMARY KEY,
-    chat_id TEXT NOT NULL,
-    content TEXT NOT NULL,
-    importance INTEGER DEFAULT 1,
-    created_at TIMESTAMP DEFAULT NOW()
-);
-`);
-console.log("✅ Таблицы готовы.");
+/**
+ * @typedef {Object} Message
+ * @property {number} id
+ * @property {string} chat_id
+ * @property {MessageRole} role
+ * @property {string} text
+ * @property {Date} created_at
+ */
 
+/**
+ * @param {string} chatId
+ * @param {MessageRole} role
+ * @param {string} text
+ * @returns {Promise<import('pg').QueryResult<Message>>}
+ */
 export async function saveMessage(chatId, role, text) {
     return dbQuery(
         `
