@@ -1,5 +1,6 @@
-console.log("INDEX STARTED", process.argv);
+console.log(process.argv);
 import "dotenv/config";
+console.log("INDEX STARTED", process.argv);
 
 import { createInterface } from "node:readline";
 import { stdin as input, stdout as output } from "node:process";
