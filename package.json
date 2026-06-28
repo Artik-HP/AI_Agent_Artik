@@ -13,12 +13,14 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@neondatabase/neon-js": "0.6.2-beta",
     "@tavily/core": "^0.7.6",
     "api": "^6.1.2",
     "cheerio": "^1.2.0",
     "dotenv": "^17.4.2",
     "node": "^26.3.0",
     "pg": "^8.22.0",
+    "react-router-dom": "^7.18.0",
     "telegraf": "^4.16.3",
     "telegram": "^2.26.22"
   },

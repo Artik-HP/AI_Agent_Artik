@@ -41,8 +41,7 @@ function getErrorMessage(error) {
 }
 
 async function main() {
-  const databaseStatus = await initDatabase();
-  console.log("DATABASE:", databaseStatus.message);
+  await initDatabase();
 
   const isTelegramMode =
     process.argv.includes(TELEGRAM_FLAG);
