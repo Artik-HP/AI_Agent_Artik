@@ -11,6 +11,7 @@ import { searchYouTube } from "./youtube.js";
 // импортируем YouTube
 import { analyzeCodebase } from "./codeAnalyzer.js";
 import webReader from "./webReader.js";
+import drawImage from "./drawImage.js";
 
 
 
@@ -90,6 +91,11 @@ fileReader: {
 codebase: {
   description: "Читает и анализирует код проекта",
   run: async () => analyzeCodebase()
+},
+
+draw: {
+  description: "Генерирует картинку по текстовому описанию",
+  run: async input => drawImage.run(input ?? "")
 },
 };
 

@@ -69,11 +69,10 @@ function load() {
 /**
  * @returns {void}
  */
-function persist() {
-  fs.writeFileSync(
-    MEMORY_FILE,
-    JSON.stringify(store, null, 2),
-    "utf8"
+async function persist() {
+  await dbQuery(
+    "INSERT INTO memories (chat_id, content) VALUES ($1, $2);",
+    [getKey(chatId), JSON.stringify(store, null, 2)]
   );
 }
 
@@ -89,6 +88,7 @@ function getKey(chatId = "default") {
  * @returns {Promise<boolean>}
  */
 async function shouldUseDatabase() {
+ 
   if (!isDatabaseConfigured()) {
     return false;
   }
