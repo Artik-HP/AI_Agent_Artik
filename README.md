@@ -38,16 +38,18 @@ OPENROUTER_API_KEY=твой_ключ_openrouter
 MODEL_DEFAULT=openai/gpt-4o-mini
 ```
 
-Опционально подключи PostgreSQL для долговременной памяти:
+Опционально подключи PostgreSQL на Neon для долговременной памяти:
+
+```env
+DATABASE_URL=postgresql://user:password@ep-example.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require
+DATABASE_SSL=require
+```
+
+Для локального PostgreSQL без SSL можно использовать обычную строку подключения и отключить SSL:
 
 ```env
 DATABASE_URL=postgresql://user:password@localhost:5432/ai_agent_artik
-```
-
-Для облачных PostgreSQL-провайдеров, которым нужен SSL, добавь:
-
-```env
-DATABASE_SSL=require
+DATABASE_SSL=disable
 ```
 
 3. Запусти CLI-режим:
@@ -62,7 +64,13 @@ npm start
 npm run telegram
 ```
 
-5. Запусти тесты:
+5. Для 24/7-запуска Telegram-бота на сервере/VPS используй PM2-конфиг:
+
+```bash
+npx pm2 start ecosystem.config.cjs
+```
+
+6. Запусти тесты:
 
 ```bash
 npm test
@@ -90,6 +98,9 @@ npm test
 | `IMAGE_HEIGHT` | Высота картинки. По умолчанию `1024`. |
 | `DATABASE_URL` | Строка подключения PostgreSQL. Если задана, долговременная память хранится в таблице `memories`. |
 | `DATABASE_SSL` | SSL-режим PostgreSQL: `require`/`true` включает SSL, `disable`/`false` выключает. |
+| `DATABASE_POOL_MAX` | Необязательный лимит пула `pg`. По умолчанию `1` для Neon pooler URL и `5` для прямого подключения. |
+| `DATABASE_CONNECTION_TIMEOUT_MS` | Необязательный таймаут подключения к PostgreSQL. По умолчанию `10000`. |
+| `DATABASE_IDLE_TIMEOUT_MS` | Необязательный таймаут простоя соединений пула. По умолчанию `30000`. |
 
 ## Команды
 
@@ -359,10 +370,28 @@ TELEGRAM_BOT_TOKEN=твой_telegram_bot_token
 - отправлять сгенерированную картинку как фото, если Telegram смог загрузить URL;
 - отправлять длинные ответы частями до 3900 символов.
 
+## 24/7 запуск
+
+Для постоянной работы используй Telegram-режим вместе с Neon PostgreSQL:
+
+```bash
+npm run telegram
+```
+
+На сервере/VPS удобнее запускать через PM2, чтобы процесс автоматически поднимался после падения:
+
+```bash
+npx pm2 start ecosystem.config.cjs
+npx pm2 save
+```
+
+Перед запуском проверь, что в `.env` заданы `TELEGRAM_BOT_TOKEN`, `OPENROUTER_API_KEY` и `DATABASE_URL`. Команда `/db` в Telegram показывает, подключена ли база и используется ли таблица `memories`.
+
 ## Архитектура проекта
 
 ```text
 .
+├─ ecosystem.config.cjs     # PM2-конфиг для 24/7 Telegram-режима
 ├─ index.js                 # запуск CLI или Telegram-бота
 ├─ package.json             # npm-скрипты и зависимости
 ├─ README.md                # документация проекта
@@ -417,6 +446,7 @@ TELEGRAM_BOT_TOKEN=твой_telegram_bot_token
 | --- | --- |
 | `npm start` | Запускает CLI-агента. |
 | `npm run telegram` | Запускает Telegram-бота. |
+| `npm run start:24x7` | Запускает Telegram-бота в long-running режиме для процесс-менеджера. |
 | `npm test` | Запускает тесты через `node --test`. |
 
 ## Тесты

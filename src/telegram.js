@@ -145,10 +145,10 @@ async function downloadTelegramFile(fileId, ctx) {
  * @param {import("telegraf").Context} ctx
  */
 async function handleTextMessage(ctx) {
-  console.log("TEXT FROM TELEGRAM:", ctx.message.text);
-  console.log("CHAT ID:", ctx.chat.id);
-  const chatId = ctx.chat.id;
-  const userText = normalizeTelegramText(ctx.message.text);
+  console.log("TEXT FROM TELEGRAM:", ctx.message && 'text' in ctx.message ? ctx.message.text : undefined);
+  console.log("CHAT ID:", ctx.chat?.id);
+  const chatId = ctx.chat?.id;
+  const userText = normalizeTelegramText((ctx.message && 'text' in ctx.message ? ctx.message.text : undefined) ?? "");
 
   try {
     const agent = getAgent(chatId);
@@ -166,8 +166,8 @@ async function handleTextMessage(ctx) {
  */
 async function handleSpeechMessage(ctx) {
   const message = ctx.message;
-  const audio = message.voice || message.audio;
-  const chatId = ctx.chat.id;
+  const audio = (message && 'voice' in message ? message.voice : undefined) || (message && 'audio' in message ? message.audio : undefined);
+  const chatId = ctx.chat?.id;
 
   if (!audio) {
     return;
@@ -178,7 +178,7 @@ async function handleSpeechMessage(ctx) {
 
     const audioBuffer = await downloadTelegramFile(audio.file_id, ctx);
     const text = await transcribeAudio(audioBuffer, {
-      format: detectAudioFormat(audio.mime_type, audio.file_name),
+      format: detectAudioFormat(audio.mime_type, 'file_name' in audio && typeof audio.file_name === 'string' ? audio.file_name : undefined),
       language: process.env.OPENROUTER_STT_LANGUAGE || process.env.STT_LANGUAGE
     });
 
@@ -210,9 +210,7 @@ async function handleTelegramError(ctx, error) {
 
 export async function startTelegramBot() {
   const token = process.env.TELEGRAM_BOT_TOKEN;
-console.log("INDEX STARTED", process.argv);
-console.log(process.argv);
-console.log(JSON.stringify(process.argv, null, 2));
+
   if (!token) {
     throw new Error(
       "TELEGRAM_BOT_TOKEN не найден"
@@ -220,6 +218,9 @@ console.log(JSON.stringify(process.argv, null, 2));
   }
 
   const bot = new Telegraf(token);
+
+  process.once("SIGINT", () => bot.stop("SIGINT"));
+  process.once("SIGTERM", () => bot.stop("SIGTERM"));
 
   bot.start(ctx => {
     return ctx.reply(
@@ -231,10 +232,33 @@ console.log(JSON.stringify(process.argv, null, 2));
   bot.on("text", handleTextMessage);
   bot.on("voice", handleSpeechMessage);
   bot.on("audio", handleSpeechMessage);
+console.log("TOKEN:", token ? "есть" : "нет");
+console.log("1. Создаем Telegraf");
+const bot = new Telegraf(token);
 
-  await bot.launch();
+console.log("2. Регистрируем обработчики");
 
-  console.log(
+process.once("SIGINT", () => bot.stop("SIGINT"));
+process.once("SIGTERM", () => bot.stop("SIGTERM"));
+
+bot.start(ctx => {
+  return ctx.reply(
+    "Привет! Я AI_Agent_JS 🤖\nВыбери агента, открой команды или попроси нарисовать картинку.",
+    MAIN_KEYBOARD
+  );
+});
+
+bot.on("text", handleTextMessage);
+bot.on("voice", handleSpeechMessage);
+bot.on("audio", handleSpeechMessage);
+
+console.log("3. Перед launch");
+
+await bot.launch();
+
+console.log("4. После launch");
+  
+console.log(
     "Telegram bot started"
   );
 }

@@ -4,11 +4,13 @@
   "type": "module",
   "description": "Simple CLI AI agent prototype",
   "main": "index.js",
-"scripts": {
-"start": "node index.js --telegram",
-  "test": "node --test"
-},
- "keywords": [],
+  "scripts": {
+    "start": "node index.js",
+    "telegram": "node index.js --telegram",
+    "start:24x7": "node index.js --telegram",
+    "test": "node --test"
+  },
+  "keywords": [],
   "author": "",
   "license": "ISC",
   "dependencies": {
@@ -24,6 +26,8 @@
     "telegram": "^2.26.22"
   },
   "devDependencies": {
-    "eslint": "^10.4.1"
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.4.1",
+    "globals": "^17.7.0"
   }
 }

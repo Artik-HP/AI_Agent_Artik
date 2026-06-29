@@ -69,10 +69,11 @@ function load() {
 /**
  * @returns {void}
  */
-async function persist() {
-  await dbQuery(
-    "INSERT INTO memories (chat_id, content) VALUES ($1, $2);",
-    [getKey(chatId), JSON.stringify(store, null, 2)]
+function persistFile() {
+  fs.writeFileSync(
+    MEMORY_FILE,
+    JSON.stringify(store, null, 2),
+    "utf8"
   );
 }
 
@@ -100,7 +101,6 @@ async function shouldUseDatabase() {
 
   return true;
 }
-
 /**
  * @param {string} text
  * @param {string | number} chatId
@@ -122,7 +122,7 @@ await dbQuery(      "INSERT INTO memories (chat_id, content) VALUES ($1, $2);",
   }
 
   store[key].push(text);
-  persist();
+  persistFile();
 
   return true;
 }
@@ -166,7 +166,7 @@ await dbQuery(      "DELETE FROM memories WHERE chat_id = $1;",
   const key = getKey(chatId);
 
   store[key] = [];
-  persist();
+  persistFile();
 
   return true;
 }
@@ -212,7 +212,7 @@ export async function remove(index, chatId = "default") {
 
   memories.splice(index, 1);
   store[key] = memories;
-  persist();
+  persistFile();
 
   return true;
 }
@@ -264,16 +264,7 @@ export async function removeByText(text, chatId = "default") {
 
   memories.splice(index, 1);
   store[key] = memories;
-  persist();
+  persistFile();
 
   return true;
-}
-
-/**
- * @param {string} arg0
- * @param {(string | number)[]} arg1
- * @returns {Promise<QueryResult>}
- */
-function query(arg0, arg1) {
-  return /** @type {Promise<QueryResult>} */ (dbQuery(arg0, arg1));
 }
