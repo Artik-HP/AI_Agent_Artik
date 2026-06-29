@@ -118,5 +118,6 @@ const result = Function(
  * @returns {WeatherData}q
  */
 export function weather(city) {
+  void city;
   throw new Error("Function not implemented.");
 }

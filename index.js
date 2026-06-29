@@ -1,6 +1,4 @@
-console.log(process.argv);
 import "dotenv/config";
-console.log("INDEX STARTED", process.argv);
 
 import { createInterface } from "node:readline";
 import { stdin as input, stdout as output } from "node:process";
@@ -46,15 +44,11 @@ async function main() {
   const isTelegramMode =
     process.argv.includes(TELEGRAM_FLAG);
 
-  console.log("TELEGRAM MODE:", isTelegramMode);
+  if (isTelegramMode) {
+    await runTelegramBot();
 
-if (isTelegramMode) {
-  console.log("RUNNING TELEGRAM BOT");
-
-  await runTelegramBot();
-
-  return;
-}
+    return;
+  }
 
   try {
     await runCli();
