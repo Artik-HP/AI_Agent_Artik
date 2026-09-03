@@ -104,6 +104,20 @@ function shouldUseExcelTool(lower) {
     lower.includes("сформируй заказ поставщику") ||
     lower.includes("создай заказ поставщику") ||
     lower.includes("заказ поставщику") ||
+    lower.includes("непродан") ||
+    lower.includes("не продал") ||
+    lower.includes("неликвид") ||
+    lower.includes("нераспродан") ||
+    lower.includes("что не продалось") ||
+    lower.includes("оставь только") ||
+    lower.includes("оставить только") ||
+    lower.includes("удали всё кроме") ||
+    lower.includes("удали все кроме") ||
+    lower.includes("keep only") ||
+    /перем[іие]щ/i.test(lower) ||
+    /перераспредел|развез|разброса|раскида/i.test(lower) ||
+    lower.includes("перекинь") ||
+    lower.includes("документ перемещения") ||
     shouldEditExcel(lower) ||
     (
       (

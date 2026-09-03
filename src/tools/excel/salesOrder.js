@@ -2,39 +2,77 @@ import fs from "node:fs";
 import path from "node:path";
 
 import ExcelJS from "exceljs";
-import xlsx from "xlsx";
 
 import {
   discoverSpreadsheetFiles,
+  existsInProject,
   extractSpreadsheetPaths,
+  normalizeHeader,
+  readSheetMatrices,
   resolveProjectPath,
+  sheetPointName,
   toProjectPath
 } from "./reader.js";
 import { parseNumber } from "./search.js";
+import { loadSupplySettings } from "./reportGenerator.js";
 
 const OUTPUT_DIR = "exports";
 const DEFAULT_MAX_STOCK_DAYS = 45;
 const DEFAULT_TARGET_PERIODS = 2;
+
+/**
+ * Префиксы артикулов, которые рассматриваем для заказа. Значение по умолчанию —
+ * из config.yaml (supply_settings.sku_prefixes); этот массив используется, если
+ * конфиг недоступен. Порядок = приоритет сортировки строк в готовом файле.
+ */
 const DEFAULT_SKU_PREFIXES = [
-  "SO",
+  "PJ",
   "SX",
+  "SO",
+  "FM",
   "AD",
-  "PJ"
+  "MD",
+  "AL"
 ];
 
-const COLUMN_INDEX = {
+/** Порог реализации по умолчанию, если не задан в config.yaml и не в запросе. */
+const FALLBACK_MIN_SELL_THROUGH = 0.4;
+
+/**
+ * Позиции колонок в «эталонной» выгрузке. Используются как запасной вариант,
+ * если колонку не удалось найти по тексту заголовка.
+ */
+const LEGACY_COLUMN_INDEX = {
   sku: 0,
   name: 1,
   start: 2,
   receipt: 3,
-  available: 5,
   expense: 6,
   retailSales: 7,
   buyerSales: 8,
-  end: 9,
-  turnover: 10,
-  stockDays: 11,
-  sellThrough: 12
+  end: 9
+};
+
+/** Ширина периода отчёта по умолчанию, если не задана и не вычислена из дат. */
+const FALLBACK_PERIOD_DAYS = 14;
+
+/**
+ * Тексты заголовков, по которым ищем нужные колонки в первых строках отчёта.
+ * Раскладка выгрузок из 1С/BAS отличается между торговыми точками, поэтому
+ * позицию колонки определяем по названию, а не по индексу.
+ */
+const HEADER_LABELS = {
+  start: ["начало", "початок"],
+  receipt: ["приход", "прихід"],
+  expense: ["расход", "розхід", "витрата"],
+  retailSales: [
+    "отчет о розничных продажах",
+    "звіт про роздрібні продажі",
+    "розничных продаж",
+    "роздрібних продаж"
+  ],
+  buyerSales: ["продажа покупателю", "продаж покупцю"],
+  end: ["конец", "кінець"]
 };
 
 const FILL_COLORS = {
@@ -47,6 +85,7 @@ const FILL_COLORS = {
 /**
  * @typedef {Object} SalesOrderLine
  * @property {number} sourceRow
+ * @property {string} [point] точка (имя вкладки), "" если вкладка одна
  * @property {string} sku
  * @property {string} name
  * @property {number|null} start
@@ -67,6 +106,17 @@ const FILL_COLORS = {
  * @property {number} maxStockDays
  * @property {number} targetPeriods
  * @property {string[]} skuPrefixes
+ * @property {number} periodDays
+ * @property {number} minSellThrough доля Расход/(Начало+Приход), ниже которой не заказываем
+ */
+
+/**
+ * @typedef {Object} SalesOrderStats
+ * @property {number} productRows строк с артикулом и наименованием
+ * @property {number} prefixMatched из них с нужным префиксом артикула
+ * @property {number} withSales из них с расходом больше нуля
+ * @property {number} lowSellThrough отброшено: реализация ниже порога minSellThrough
+ * @property {number} overstocked отброшено как затоваренные (запас больше лимита)
  */
 
 /**
@@ -77,6 +127,7 @@ const FILL_COLORS = {
  * @property {SalesOrderOptions} options
  * @property {SalesOrderLine[]} lines
  * @property {{ lines: number, recommendedTotal: number }} summary
+ * @property {SalesOrderStats} [stats]
  * @property {string[]} notes
  */
 
@@ -148,6 +199,20 @@ function extractTargetPeriods(query) {
 }
 
 /**
+ * Список префиксов из config.yaml (supply_settings.sku_prefixes). Строку
+ * «PJ, SX» тоже принимаем. Если ничего валидного нет — DEFAULT_SKU_PREFIXES.
+ * @returns {string[]}
+ */
+function configuredSkuPrefixes() {
+  const raw = loadSupplySettings().sku_prefixes;
+  const list = (Array.isArray(raw) ? raw : String(raw || "").split(/[\s,]+/))
+    .map(prefix => String(prefix).trim().toUpperCase())
+    .filter(Boolean);
+
+  return list.length > 0 ? list : DEFAULT_SKU_PREFIXES;
+}
+
+/**
  * @param {string} query
  * @returns {string[]}
  */
@@ -157,7 +222,7 @@ function extractSkuPrefixes(query) {
   );
 
   if (!match) {
-    return DEFAULT_SKU_PREFIXES;
+    return configuredSkuPrefixes();
   }
 
   const prefixes = match[1]
@@ -165,19 +230,116 @@ function extractSkuPrefixes(query) {
     .map(prefix => prefix.trim().toUpperCase())
     .filter(Boolean);
 
-  return prefixes.length > 0 ? prefixes : DEFAULT_SKU_PREFIXES;
+  return prefixes.length > 0 ? prefixes : configuredSkuPrefixes();
+}
+
+/**
+ * Минимальная реализация (Расход / (Начало + Приход)), ниже которой позиция
+ * в заказ не идёт. Понимает «продаж%=40», «реализация=0.4», «sell_through=40».
+ * Значение больше 1 трактуется как проценты. Иначе — из config.yaml.
+ * @param {string} query
+ * @returns {number}
+ */
+function extractMinSellThrough(query) {
+  const fallback = Number(loadSupplySettings().min_sell_through);
+  const base = Number.isFinite(fallback) && fallback >= 0 && fallback < 1
+    ? fallback
+    : FALLBACK_MIN_SELL_THROUGH;
+  const match = String(query || "").match(
+    /(?:sell[_\s-]?through|min[_\s-]?sell|продаж\s*%|%\s*продаж|реализаци[яи]|процент\s+продаж)\s*[:=]?\s*(\d+(?:[.,]\d+)?)/i
+  );
+
+  if (!match) {
+    return base;
+  }
+
+  const value = toNumber(match[1]) || 0;
+  const ratio = value > 1 ? value / 100 : value;
+
+  return ratio >= 0 && ratio < 1 ? ratio : base;
+}
+
+/**
+ * Вычисляет длину периода отчёта в днях по датам вида «16.08-2.09» или
+ * «18.06.2026-05.07.2026» в тексте запроса или имени файла. Если дат нет —
+ * возвращает значение по умолчанию из config.yaml.
+ * @param {string} text
+ * @returns {number}
+ */
+function extractPeriodDays(text) {
+  const fallback = loadSupplySettings().default_period_days || FALLBACK_PERIOD_DAYS;
+  const match = String(text || "").match(
+    /(\d{1,2})[.\-/](\d{1,2})(?:[.\-/](\d{2,4}))?\s*[-–—]\s*(\d{1,2})[.\-/](\d{1,2})(?:[.\-/](\d{2,4}))?/
+  );
+
+  if (!match) {
+    return fallback;
+  }
+
+  const now = new Date();
+  const fromYear = Number(match[3] || match[6]) || now.getFullYear();
+  const toYear = Number(match[6] || match[3]) || fromYear;
+  const from = new Date(fromYear, Number(match[2]) - 1, Number(match[1]));
+  const to = new Date(toYear, Number(match[5]) - 1, Number(match[4]));
+  const days = Math.round((to.getTime() - from.getTime()) / 86_400_000) + 1;
+
+  return days >= 1 && days <= 180 ? days : fallback;
 }
 
 /**
  * @param {string} query
+ * @param {string} [sourceHint] имя файла-отчёта — там тоже бывают даты периода
  * @returns {SalesOrderOptions}
  */
-function parseOptions(query) {
+function parseOptions(query, sourceHint = "") {
   return {
     maxStockDays: extractMaxStockDays(query),
     targetPeriods: extractTargetPeriods(query),
-    skuPrefixes: extractSkuPrefixes(query)
+    skuPrefixes: extractSkuPrefixes(query),
+    periodDays: extractPeriodDays(`${query} ${sourceHint}`),
+    minSellThrough: extractMinSellThrough(query)
   };
+}
+
+/**
+ * Находит индексы колонок отчёта по тексту заголовков в первых строках.
+ * Колонки, которые не удалось распознать, берутся из LEGACY_COLUMN_INDEX.
+ * @param {unknown[][]} rows
+ * @returns {Record<string, number>}
+ */
+function resolveColumns(rows) {
+  const headerRows = rows.slice(0, 5);
+  /** @type {Record<string, number>} */
+  const resolved = {
+    sku: LEGACY_COLUMN_INDEX.sku,
+    name: LEGACY_COLUMN_INDEX.name
+  };
+
+  for (const [key, labels] of Object.entries(HEADER_LABELS)) {
+    const normalizedLabels = labels.map(normalizeHeader);
+    let found = -1;
+
+    for (const row of headerRows) {
+      found = (Array.isArray(row) ? row : []).findIndex(cell => {
+        const header = normalizeHeader(cell);
+
+        return (
+          header.length >= 4 &&
+          normalizedLabels.some(label =>
+            header === label || header.includes(label) || label.includes(header)
+          )
+        );
+      });
+
+      if (found !== -1) {
+        break;
+      }
+    }
+
+    resolved[key] = found === -1 ? LEGACY_COLUMN_INDEX[key] : found;
+  }
+
+  return resolved;
 }
 
 /**
@@ -201,26 +363,21 @@ function looksLikeOutputFile(filePath) {
  */
 function isLikelyMovementReport(filePath) {
   try {
-    const workbook = xlsx.readFile(resolveProjectPath(filePath));
-    const sheetName = workbook.SheetNames[0];
-    const worksheet = workbook.Sheets[sheetName];
-    const rows = xlsx.utils.sheet_to_json(worksheet, {
-      header: 1,
-      defval: "",
-      raw: false,
-      blankrows: false
-    });
-    const headerText = rows
-      .slice(0, 3)
-      .flat()
-      .join(" ")
-      .toLowerCase();
+    // Достаточно одной подходящей вкладки: первая бывает титульной или сводной,
+    // а сам отчёт лежит на второй.
+    return readSheetMatrices(filePath).some(sheet => {
+      const headerText = sheet.rows
+        .slice(0, 3)
+        .flat()
+        .join(" ")
+        .toLowerCase();
 
-    return (
-      headerText.includes("отчет о розничных продажах") ||
-      headerText.includes("звіт") ||
-      headerText.includes("розничных продаж")
-    );
+      return (
+        headerText.includes("отчет о розничных продажах") ||
+        headerText.includes("звіт") ||
+        headerText.includes("розничных продаж")
+      );
+    });
   } catch {
     return false;
   }
@@ -232,10 +389,11 @@ function isLikelyMovementReport(filePath) {
  * @returns {string|null}
  */
 function findReportFile(query, memories) {
-  const files = unique([
-    ...extractSpreadsheetPaths(query),
-    ...extractSpreadsheetPaths(memories.join("\n"))
-  ]);
+  // Явно названный в запросе файл — приоритетнее. Дальше идут пути из памяти,
+  // но в обратном порядке: последний загруженный в Telegram отчёт — первым.
+  const queryFiles = extractSpreadsheetPaths(query);
+  const memoryFiles = extractSpreadsheetPaths(memories.join("\n")).reverse();
+  const files = unique([...queryFiles, ...memoryFiles]).filter(existsInProject);
 
   if (files.length > 0) {
     return files.find(file => !looksLikeOutputFile(file)) || files[0];
@@ -262,18 +420,22 @@ export function hasSalesOrderReport(input) {
 }
 
 /**
+ * Строка товара: есть артикул и наименование. Строки-заголовки складов
+ * (в первой колонке — название точки, вторая пустая) и служебные строки
+ * отсекаются.
  * @param {unknown[]} row
+ * @param {Record<string, number>} columns
  * @returns {boolean}
  */
-function isProductRow(row) {
-  const sku = String(row[COLUMN_INDEX.sku] || "").trim();
-  const name = String(row[COLUMN_INDEX.name] || "").trim();
+function isProductRow(row, columns) {
+  const sku = String(row[columns.sku] || "").trim();
+  const name = String(row[columns.name] || "").trim();
 
   return Boolean(
     sku &&
     name &&
     sku !== "Номенклатура.Артикул" &&
-    !sku.toLowerCase().includes("toppers")
+    !/^номенклатура\b/i.test(sku)
   );
 }
 
@@ -305,92 +467,222 @@ function hasAllowedPrefix(sku, prefixes) {
 }
 
 /**
- * @param {unknown[]} row
- * @param {number} sourceRow
+ * Сколько единиц заказать поставщику по одной строке отчёта. Держи расчёт
+ * согласованным с buildOrderFormula (колонка «Заказ» в готовом Excel): если
+ * меняешь модель здесь — поправь и формулу, иначе кэшированный итог и живой
+ * пересчёт в файле разойдутся.
+ * @param {{ expense: number, available: number, end: number, retailSales: number|null, buyerSales: number|null, turnover: number, stockDays: number, sellThrough: number }} metrics
  * @param {SalesOrderOptions} options
- * @returns {SalesOrderLine|null}
+ * @returns {number} целое >= 0; 0 = заказывать не нужно
  */
-function createSalesOrderLine(row, sourceRow, options) {
-  if (!isProductRow(row)) {
-    return null;
-  }
+function computeRecommendedOrder(metrics, options) {
+  const { expense, end } = metrics;
 
-  const sku = String(row[COLUMN_INDEX.sku]).trim();
-
-  if (!hasAllowedPrefix(sku, options.skuPrefixes)) {
-    return null;
-  }
-
-  const expense = toNumber(row[COLUMN_INDEX.expense]) || 0;
-  const stockDays = toNumber(row[COLUMN_INDEX.stockDays]) || 0;
-
-  if (
-    expense <= 0 ||
-    stockDays <= 0 ||
-    stockDays > options.maxStockDays
-  ) {
-    return null;
-  }
-
-  const end = toNumber(row[COLUMN_INDEX.end]) || 0;
+  // Держим запас на options.targetPeriods периодов продаж и вычитаем остаток.
+  // Ровно эта же арифметика продублирована в buildOrderFormula как живая
+  // Excel-формула колонки «Заказ» — меняешь модель, меняй оба места.
   const recommendedOrder = Math.max(
     0,
     Math.ceil(expense * options.targetPeriods - end)
   );
 
+  return Math.max(0, Math.trunc(Number(recommendedOrder) || 0));
+}
+
+/**
+ * Разбирает строку отчёта и объясняет, на каком шаге фильтра она отсеялась.
+ * @param {unknown[]} row
+ * @param {number} sourceRow
+ * @param {SalesOrderOptions} options
+ * @param {Record<string, number>} columns
+ * @returns {{ stage: "not_product"|"wrong_prefix"|"no_sales"|"low_sellthrough"|"overstocked"|"ok", line: SalesOrderLine|null }}
+ */
+function classifyReportRow(row, sourceRow, options, columns) {
+  if (!isProductRow(row, columns)) {
+    return { stage: "not_product", line: null };
+  }
+
+  const sku = String(row[columns.sku]).trim();
+
+  if (!hasAllowedPrefix(sku, options.skuPrefixes)) {
+    return { stage: "wrong_prefix", line: null };
+  }
+
+  const start = toNumber(row[columns.start]);
+  const receipt = toNumber(row[columns.receipt]);
+  const expense = toNumber(row[columns.expense]) || 0;
+  const end = toNumber(row[columns.end]) || 0;
+  const available = (start || 0) + (receipt || 0);
+
+  if (expense <= 0) {
+    return { stage: "no_sales", line: null };
+  }
+
+  // turnover — на сколько «периодов» продаж хватает поступивших единиц.
+  // stockDays — то же в днях. sellThrough — доля проданного из поступившего.
+  const turnover = available > 0 ? available / expense : 0;
+  const stockDays = turnover * options.periodDays;
+  const sellThrough = available > 0 ? expense / available : 0;
+
+  // Правило закупщика: продали меньше порога от того, что было в наличии, —
+  // товар не движется, новый завоз не нужен.
+  if (available > 0 && sellThrough < options.minSellThrough) {
+    return { stage: "low_sellthrough", line: null };
+  }
+
+  if (stockDays > options.maxStockDays) {
+    return { stage: "overstocked", line: null };
+  }
+
+  const retailSales = toNumber(row[columns.retailSales]);
+  const buyerSales = toNumber(row[columns.buyerSales]);
+  const recommendedOrder = computeRecommendedOrder(
+    { expense, available, end, retailSales, buyerSales, turnover, stockDays, sellThrough },
+    options
+  );
+
   return {
-    sourceRow,
-    sku,
-    name: String(row[COLUMN_INDEX.name] || "").trim(),
-    start: toNumber(row[COLUMN_INDEX.start]),
-    receipt: toNumber(row[COLUMN_INDEX.receipt]),
-    available: toNumber(row[COLUMN_INDEX.available]),
-    expense,
-    retailSales: toNumber(row[COLUMN_INDEX.retailSales]),
-    buyerSales: toNumber(row[COLUMN_INDEX.buyerSales]),
-    end: toNumber(row[COLUMN_INDEX.end]),
-    turnover: toNumber(row[COLUMN_INDEX.turnover]),
-    stockDays,
-    sellThrough: toNumber(row[COLUMN_INDEX.sellThrough]),
-    recommendedOrder
+    stage: "ok",
+    line: {
+      sourceRow,
+      sku,
+      name: String(row[columns.name] || "").trim(),
+      start,
+      receipt,
+      available,
+      expense,
+      retailSales,
+      buyerSales,
+      end,
+      turnover: Number(turnover.toFixed(3)),
+      stockDays: Number(stockDays.toFixed(1)),
+      sellThrough: Number(sellThrough.toFixed(3)),
+      recommendedOrder
+    }
   };
 }
 
 /**
- * @param {string} filePath
+ * Разбирает одну вкладку: раскладка колонок определяется внутри вкладки, у
+ * разных точек она разная.
+ * @param {import("./reader.js").SheetMatrix} sheet
  * @param {SalesOrderOptions} options
+ * @param {string} point название точки (имя вкладки), "" для книги из одного листа
+ * @returns {{ lines: SalesOrderLine[], stats: SalesOrderStats }}
+ */
+function readReportSheet(sheet, options, point) {
+  const rows = sheet.rows;
+  const columns = resolveColumns(rows);
+  const stats = {
+    productRows: 0,
+    prefixMatched: 0,
+    withSales: 0,
+    lowSellThrough: 0,
+    overstocked: 0
+  };
+  /** @type {SalesOrderLine[]} */
+  const lines = [];
+
+  rows.forEach((row, index) => {
+    const { stage, line } = classifyReportRow(row, index + 1, options, columns);
+
+    if (stage === "not_product") {
+      return;
+    }
+
+    stats.productRows += 1;
+
+    if (stage === "wrong_prefix") {
+      return;
+    }
+
+    stats.prefixMatched += 1;
+
+    if (stage === "no_sales") {
+      return;
+    }
+
+    stats.withSales += 1;
+
+    if (stage === "low_sellthrough") {
+      stats.lowSellThrough += 1;
+      return;
+    }
+
+    if (stage === "overstocked") {
+      stats.overstocked += 1;
+      return;
+    }
+
+    if (line) {
+      lines.push({ ...line, point });
+    }
+  });
+
+  return { lines, stats };
+}
+
+/**
+ * Один и тот же артикул на нескольких вкладках — это один товар на разных
+ * точках. Сейчас каждая точка остаётся отдельной строкой заказа.
+ * @param {SalesOrderLine[]} lines
  * @returns {SalesOrderLine[]}
  */
-function readSalesOrderLines(filePath, options) {
-  const fullPath = resolveProjectPath(filePath);
-  const workbook = xlsx.readFile(fullPath, {
-    cellDates: true
+function combineSheetLines(lines) {
+  // TODO(human): решить, склеивать ли строки одного артикула с разных вкладок.
+  return lines;
+}
+
+/**
+ * Читает отчёт целиком: каждая вкладка — своя точка. Книга из одного листа
+ * ведёт себя как раньше, точка пустая.
+ * @param {string} filePath
+ * @param {SalesOrderOptions} options
+ * @returns {{ lines: SalesOrderLine[], stats: SalesOrderStats }}
+ */
+function readReport(filePath, options) {
+  const sheets = readSheetMatrices(filePath, { raw: true });
+  /** @type {SalesOrderLine[]} */
+  const lines = [];
+  const stats = {
+    productRows: 0,
+    prefixMatched: 0,
+    withSales: 0,
+    lowSellThrough: 0,
+    overstocked: 0
+  };
+
+  for (const sheet of sheets) {
+    const point = sheetPointName(sheet.name, sheets.length) || "";
+    const parsed = readReportSheet(sheet, options, point);
+
+    lines.push(...parsed.lines);
+
+    for (const key of Object.keys(stats)) {
+      stats[key] += parsed.stats[key];
+    }
+  }
+
+  const combined = combineSheetLines(lines);
+
+  combined.sort((first, second) => {
+    const rankDiff =
+      getPrefixRank(first.sku, options.skuPrefixes) -
+      getPrefixRank(second.sku, options.skuPrefixes);
+
+    if (rankDiff !== 0) {
+      return rankDiff;
+    }
+
+    // Внутри префикса строки идут точками, чтобы заказ читался по складам.
+    if (first.point !== second.point) {
+      return first.point < second.point ? -1 : 1;
+    }
+
+    return first.sourceRow - second.sourceRow;
   });
-  const sheetName = workbook.SheetNames[0];
-  const worksheet = workbook.Sheets[sheetName];
-  const rows = xlsx.utils.sheet_to_json(worksheet, {
-    header: 1,
-    defval: "",
-    raw: true,
-    blankrows: false
-  });
 
-  return rows
-    .map((row, index) =>
-      createSalesOrderLine(row, index + 1, options)
-    )
-    .filter(Boolean)
-    .sort((first, second) => {
-      const rankDiff =
-        getPrefixRank(first.sku, options.skuPrefixes) -
-        getPrefixRank(second.sku, options.skuPrefixes);
-
-      if (rankDiff !== 0) {
-        return rankDiff;
-      }
-
-      return first.sourceRow - second.sourceRow;
-    });
+  return { lines: combined, stats };
 }
 
 /**
@@ -423,8 +715,8 @@ function styleWorksheet(worksheet) {
     }
   ];
   worksheet.autoFilter = {
-    from: "A1",
-    to: "M1"
+    from: { row: 1, column: 1 },
+    to: { row: 1, column: worksheet.columnCount }
   };
 
   fillColumn(worksheet, 5, FILL_COLORS.available);
@@ -464,6 +756,21 @@ function styleWorksheet(worksheet) {
 }
 
 /**
+ * Excel-формула для колонки «Заказ» (столбец M выходного файла).
+ * F — Расход, I — Конец. Держи её согласованной с computeRecommendedOrder:
+ * baseline там — это `ceil(Расход*targetPeriods - Конец)`, ровно эта формула.
+ * Меняешь модель заказа — меняй оба места, иначе кэш и живой пересчёт разойдутся.
+ * @param {number} rowNumber
+ * @param {SalesOrderOptions} options
+ * @returns {string}
+ */
+function buildOrderFormula(rowNumber, options) {
+  const core = `MAX(0,ROUNDUP(F${rowNumber}*${options.targetPeriods}-I${rowNumber},0))`;
+
+  return `IF(${core}=0,"",${core})`;
+}
+
+/**
  * @param {SalesOrderResult} result
  * @returns {Promise<string>}
  */
@@ -485,6 +792,14 @@ async function writeSalesOrderWorkbook(result) {
   workbook.calcProperties.fullCalcOnLoad = true;
   workbook.calcProperties.forceFullCalc = true;
 
+  // «Точка» дописывается последней и только когда точек правда несколько:
+  // раскладка первых 13 колонок повторяет привычную выгрузку 1С, сдвигать её
+  // нельзя — на индексы завязаны заливка, форматы и формула заказа.
+  const points = new Set(
+    result.lines.map(line => line.point).filter(Boolean)
+  );
+  const withPoint = points.size > 1;
+
   worksheet.columns = [
     { header: "Місце зберігання", key: "sku", width: 16 },
     { header: "", key: "name", width: 72 },
@@ -498,7 +813,8 @@ async function writeSalesOrderWorkbook(result) {
     { header: "", key: "turnover", width: 10 },
     { header: "", key: "stockDays", width: 10 },
     { header: "", key: "sellThrough", width: 10 },
-    { header: "Заказ", key: "orderQuantity", width: 10 }
+    { header: "Заказ", key: "orderQuantity", width: 10 },
+    ...(withPoint ? [{ header: "Точка", key: "point", width: 12 }] : [])
   ];
 
   for (const line of result.lines) {
@@ -514,19 +830,13 @@ async function writeSalesOrderWorkbook(result) {
       end: valueOrEmpty(line.end),
       turnover: valueOrEmpty(line.turnover),
       stockDays: valueOrEmpty(line.stockDays),
-      sellThrough: valueOrEmpty(line.sellThrough)
+      sellThrough: valueOrEmpty(line.sellThrough),
+      point: withPoint ? line.point || "" : undefined
     });
     const rowNumber = row.number;
-    const orderFormula = [
-      "IF(",
-      `MAX(0,ROUNDUP(F${rowNumber}*${result.options.targetPeriods}-I${rowNumber},0))=0,`,
-      "\"\",",
-      `MAX(0,ROUNDUP(F${rowNumber}*${result.options.targetPeriods}-I${rowNumber},0))`,
-      ")"
-    ].join("");
 
     row.getCell("orderQuantity").value = {
-      formula: orderFormula,
+      formula: buildOrderFormula(rowNumber, result.options),
       result: line.recommendedOrder || ""
     };
   }
@@ -564,13 +874,60 @@ function normalizeInput(input) {
 }
 
 /**
+ * Человекочитаемое объяснение, почему из отчёта не собралось ни одной строки.
+ * @param {SalesOrderStats} stats
+ * @param {SalesOrderOptions} options
+ * @returns {string[]}
+ */
+function describeEmptyReport(stats, options) {
+  const prefixes = options.skuPrefixes.join(", ");
+
+  if (stats.productRows === 0) {
+    return [
+      "В файле не нашлось строк с артикулом и наименованием.",
+      "Похоже, это не отчёт о движении/розничных продажах."
+    ];
+  }
+
+  if (stats.prefixMatched === 0) {
+    return [
+      `Товарных строк: ${stats.productRows}, но ни один артикул не начинается с ${prefixes}.`,
+      "Уточни префиксы прямо в запросе: замовлення prefixes=SO,PR <файл>.",
+      "Префиксы перечисляются через запятую."
+    ];
+  }
+
+  if (stats.withSales === 0) {
+    return [
+      `Артикулов ${prefixes}: ${stats.prefixMatched}, но у всех расход за период равен нулю.`,
+      "Проверь, что в отчёте есть колонка «Расход» с данными за период."
+    ];
+  }
+
+  const percent = Math.round(options.minSellThrough * 100);
+
+  if (stats.lowSellThrough === stats.withSales) {
+    return [
+      `Все ${stats.withSales} продающих позиций отсеклись: реализация ниже ${percent}%.`,
+      `Снизь порог: замовлення продаж%=20 <файл> (сейчас ${percent}%).`
+    ];
+  }
+
+  return [
+    `Из ${stats.withSales} продающих позиций ${stats.lowSellThrough} ниже ${percent}% реализации, ` +
+      `остальные отсеклись как затоваренные (запас больше ${options.maxStockDays} дн.).`,
+    "Подними лимит запаса: замовлення days=90 <файл>."
+  ];
+}
+
+/**
  * @param {unknown} input
  * @returns {Promise<SalesOrderResult>}
  */
 export async function prepareSalesOrder(input) {
   const request = normalizeInput(input);
-  const options = parseOptions(request.query);
   const sourceFile = findReportFile(request.query, request.memories);
+  const options = parseOptions(request.query, sourceFile || "");
 
   if (!sourceFile) {
     return {
@@ -591,7 +948,7 @@ export async function prepareSalesOrder(input) {
     };
   }
 
-  const lines = readSalesOrderLines(sourceFile, options);
+  const { lines, stats } = readReport(sourceFile, options);
   const result = {
     status: lines.length > 0 ? "success" : "empty",
     sourceFile,
@@ -605,13 +962,12 @@ export async function prepareSalesOrder(input) {
         0
       )
     },
+    stats,
     notes: []
   };
 
   if (lines.length === 0) {
-    result.notes.push(
-      "В отчёте нет строк под фильтр замовлення Т1."
-    );
+    result.notes.push(...describeEmptyReport(stats, options));
 
     return result;
   }
@@ -638,13 +994,23 @@ export function formatSalesOrderResult(result) {
     ].join("\n");
   }
 
+  const stats = result.stats || {};
+  const percent = Math.round(result.options.minSellThrough * 100);
+  const soldShare = stats.prefixMatched
+    ? Math.round((stats.withSales / stats.prefixMatched) * 100)
+    : 0;
+
   return [
     "Замовлення Т1 подготовлено.",
     `Excel-файл: ${result.outputPath}`,
     `Позиции: ${result.summary.lines}`,
-    `Рекомендовано к заказу: ${result.summary.recommendedTotal}`,
-    `Фильтр: артикулы ${result.options.skuPrefixes.join(", ")}, запас до ${result.options.maxStockDays} дней`,
-    `Формула заказа: Расход * ${result.options.targetPeriods} - Конец`,
+    `Рекомендовано к заказу: ${result.summary.recommendedTotal} ед.`,
+    `Продажи: ${stats.withSales || 0} из ${stats.prefixMatched || 0} артикулов (${soldShare}%), ` +
+      `непродажи — ${100 - soldShare}%`,
+    `Отсеяно: <${percent}% реализации — ${stats.lowSellThrough || 0}, ` +
+      `затоварено — ${stats.overstocked || 0}`,
+    `Фильтр: артикулы ${result.options.skuPrefixes.join(", ")}, реализация от ${percent}%, запас до ${result.options.maxStockDays} дней`,
+    `Период отчёта: ${result.options.periodDays} дн., запас на ${result.options.targetPeriods} периода(ов)`,
     `Источник: ${toProjectPath(resolveProjectPath(result.sourceFile))}`
   ].join("\n");
 }

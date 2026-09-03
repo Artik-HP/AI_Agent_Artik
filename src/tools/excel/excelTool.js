@@ -1,5 +1,6 @@
 import {
   discoverSpreadsheetFiles,
+  existsInProject,
   extractSpreadsheetPaths,
   loadWorkbooks
 } from "./reader.js";
@@ -13,6 +14,23 @@ import {
   hasSalesOrderReport,
   prepareSalesOrder
 } from "./salesOrder.js";
+import {
+  analyzeDeadStock,
+  formatDeadStockResult
+} from "./deadStock.js";
+import {
+  filterRowsByName,
+  formatFilterResult
+} from "./filterByName.js";
+import {
+  buildTransferDoc,
+  formatTransferResult,
+  looksLikeTransferFile
+} from "./transferDoc.js";
+import {
+  buildRedistribution,
+  formatRedistributeResult
+} from "./redistribute.js";
 import { searchRows } from "./search.js";
 import { runEdit } from "./editor.js";
 
@@ -22,6 +40,9 @@ const HELP_TEXT = [
   "Команды:",
   "/excel заказ остатки=data/ostatki.xlsx прайс=data/price.xlsx",
   "/excel замовлення data/t1.xlsx",
+  "/excel непроданное data/t1.xlsx data/t2.xlsx data/x1.xlsx",
+  "/excel перемещение по нулевым продажам data/t1.xlsx data/t2.xlsx",
+  "/excel оставь только pjur data/t1.xlsx",
   "/excel аналитика data/ostatki.xlsx data/price.xlsx",
   "/excel поиск товар data/ostatki.xlsx",
   "",
@@ -79,11 +100,13 @@ function removeExcelCommand(query) {
  */
 function collectFilesForReadOnlyMode(query, memories) {
   const files = [
-    ...extractSpreadsheetPaths(query),
-    ...extractSpreadsheetPaths(memories.join("\n"))
-  ];
+    ...new Set([
+      ...extractSpreadsheetPaths(query),
+      ...extractSpreadsheetPaths(memories.join("\n"))
+    ])
+  ].filter(existsInProject);
 
-  return files.length > 0 ? [...new Set(files)] : discoverSpreadsheetFiles();
+  return files.length > 0 ? files : discoverSpreadsheetFiles();
 }
 
 /**
@@ -142,6 +165,70 @@ function shouldPrepareSalesOrder(lower) {
 }
 
 /**
+ * «Перемещение по нулевым продажам»: из отчётов продаж посчитать, что вывезти
+ * со складов, где товар не продаётся, туда, где продаётся. Проверять ДО
+ * shouldBuildTransfer — фраза «перемещение ... продаж 0» подходит обоим.
+ * @param {string} lower
+ * @returns {boolean}
+ */
+function shouldRedistribute(lower) {
+  return (
+    /перераспредел/i.test(lower) ||
+    /развез|разброса|раскида/i.test(lower) ||
+    (
+      /перем[іие]щ|перекин|перенос/i.test(lower) &&
+      /продаж|нулев|нол[ья]|непродающ|м[её]ртв|неликвид|\b0\b/i.test(lower)
+    )
+  );
+}
+
+/**
+ * «Документ перемещения»: список артикулов по листам-магазинам → плоская
+ * таблица «Со склада / На склад / Артикул / Название / Кол-во / Примечание».
+ * @param {string} lower
+ * @returns {boolean}
+ */
+function shouldBuildTransfer(lower) {
+  return (
+    /перем[іие]щ/i.test(lower) ||
+    /перекин/i.test(lower) ||
+    lower.includes("документ перемещения")
+  );
+}
+
+/**
+ * «Оставь только <текст>» / «удали всё кроме <текст>»: вырезать из файла все
+ * строки, кроме тех, где в названии есть заданная подстрока.
+ * @param {string} lower
+ * @returns {boolean}
+ */
+function shouldFilterByName(lower) {
+  // Без \b после кириллицы: в JS \b работает только по ASCII-словам.
+  return (
+    /остав(?:ь|ить|и)\s+(?:тольк[ои]|лишь)/i.test(lower) ||
+    /удали(?:ть)?\s+(?:вс[её]|все)\s+кроме/i.test(lower) ||
+    /залиши(?:ти)?\s+тільки/i.test(lower) ||
+    /видали(?:ти)?\s+вс[еі]\s+кр[іи]м/i.test(lower) ||
+    /keep\s+only/i.test(lower)
+  );
+}
+
+/**
+ * «Непроданное» / неликвид: собрать товары без розничных и оптовых продаж
+ * за период из нескольких файлов в один Excel.
+ * @param {string} lower
+ * @returns {boolean}
+ */
+function shouldReportDeadStock(lower) {
+  return (
+    /непродан|не\s+продал|нераспродан|неликвид|залежал|мертв\w*\s+товар|dead\s*stock/i
+      .test(lower) ||
+    lower.includes("что не продалось") ||
+    lower.includes("не продавалось")
+  );
+}
+
+/**
  * @param {string} lower
  * @returns {boolean}
  */
@@ -180,6 +267,42 @@ export async function runExcelTool(input) {
       query,
       memories: request.memories
     });
+  }
+
+  if (shouldRedistribute(lower)) {
+    const result = await buildRedistribution({
+      query,
+      memories: request.memories
+    });
+
+    return formatRedistributeResult(result);
+  }
+
+  if (shouldBuildTransfer(lower)) {
+    const result = await buildTransferDoc({
+      query,
+      memories: request.memories
+    });
+
+    return formatTransferResult(result);
+  }
+
+  if (shouldFilterByName(lower)) {
+    const result = await filterRowsByName({
+      query,
+      memories: request.memories
+    });
+
+    return formatFilterResult(result);
+  }
+
+  if (shouldReportDeadStock(lower)) {
+    const result = await analyzeDeadStock({
+      query,
+      memories: request.memories
+    });
+
+    return formatDeadStockResult(result);
   }
 
   if (shouldPrepareSalesOrder(lower)) {
@@ -247,6 +370,29 @@ export async function runExcelTool(input) {
     query,
     memories: request.memories
   });
+
+  // Под "заказ поставщику" подсунули список перемещения: колонки остатка в нём
+  // нет и не будет. Вместо тупикового отказа собираем то, чем файл является.
+  if (result.reason === "not_stock_file") {
+    const transferFiles = result.stockFiles.filter(looksLikeTransferFile);
+
+    if (transferFiles.length > 0) {
+      const transfer = await buildTransferDoc({
+        query,
+        memories: request.memories,
+        files: transferFiles
+      });
+
+      if (transfer.status === "success") {
+        return [
+          "Это список перемещения, а не остатки — заказ поставщику по нему не собрать.",
+          "Собрал документ перемещения:",
+          "",
+          formatTransferResult(transfer)
+        ].join("\n");
+      }
+    }
+  }
 
   return formatPurchaseOrderResult(result);
 }

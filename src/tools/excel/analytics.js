@@ -74,12 +74,15 @@ export function averagePrice(rows) {
  * @returns {{ row: Record<string, string>, price: number }|null}
  */
 function extremePrice(rows, direction) {
-  const pricedRows = rows
-    .map(item => ({
-      row: item.row,
-      price: parseNumber(getCell(item.row, COLUMN_ALIASES.price))
-    }))
-    .filter(item => item.price !== null);
+  const pricedRows = rows.reduce((result, item) => {
+    const price = parseNumber(getCell(item.row, COLUMN_ALIASES.price));
+
+    if (price !== null) {
+      result.push({ row: item.row, price });
+    }
+
+    return result;
+  }, /** @type {{ row: Record<string, string>, price: number }[]} */ ([]));
 
   if (pricedRows.length === 0) {
     return null;

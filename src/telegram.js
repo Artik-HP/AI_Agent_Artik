@@ -18,6 +18,26 @@ const SPREADSHEET_EXTENSIONS = new Set([
   ".xlsx"
 ]);
 
+/** callback_data кнопки «Заказ поставщику» под сообщением о загрузке файла. */
+const SUPPLIER_ORDER_ACTION = "supplier_order";
+/** Фраза, которую понимает agent.process как запрос на замовлення Т1. */
+const SUPPLIER_ORDER_PHRASE = "Подготовь заказ поставщику.";
+
+/** callback_data кнопки «Непроданное» под сообщением о загрузке файла. */
+const DEAD_STOCK_ACTION = "dead_stock";
+/** Фраза, которую agent.process маршрутизирует в отчёт по непроданному. */
+const DEAD_STOCK_PHRASE = "Собери непроданное за период.";
+
+/** callback_data кнопки «Перемещение» под сообщением о загрузке файла. */
+const TRANSFER_ACTION = "transfer_doc";
+/** Фраза, которую agent.process маршрутизирует в документ перемещения. */
+const TRANSFER_PHRASE = "Собери документ перемещения.";
+
+/** callback_data кнопки «Развезти по продажам» (перераспределение остатков). */
+const REDISTRIBUTE_ACTION = "redistribute";
+/** Фраза для маршрутизации в перемещение по нулевым продажам. */
+const REDISTRIBUTE_PHRASE = "Перемещение по нулевым продажам.";
+
 const MAIN_KEYBOARD = Markup.keyboard([
   [
     "Агент: default",
@@ -142,12 +162,16 @@ function isSpreadsheetDocument(fileName) {
 }
 
 /**
+ * Приводит имя файла к безопасному виду. Кроме символов, запрещённых в путях
+ * (`<>:"/\|?*`), убираем `,` и `;` — дальше по коду extractSpreadsheetPaths
+ * трактует их как разделители списка файлов, и запятая в имени превращается
+ * в ложный путь вида «_хвост_после_запятой.xlsx».
  * @param {string} value
  * @returns {string}
  */
-function sanitizeFileName(value) {
+export function sanitizeFileName(value) {
   return String(value || "table.xlsx")
-    .replace(/[<>:"/\\|?*]/g, "_")
+    .replace(/[<>:"/\\|?*,;]/g, "_")
     .split("")
     .filter(char => char.charCodeAt(0) >= 32)
     .join("")
@@ -309,7 +333,7 @@ async function handleDocumentMessage(ctx) {
     fs.mkdirSync(uploadDir, {
       recursive: true
     });
-    fs.writeFileSync(filePath, fileBuffer);
+    fs.writeFileSync(filePath, new Uint8Array(fileBuffer));
 
     const projectPath = path
       .relative(process.cwd(), filePath)
@@ -323,12 +347,100 @@ async function handleDocumentMessage(ctx) {
 
     await ctx.reply(
       [
-        `Файл загружен: ${projectPath}`,
-        "Я сохранил путь в память.",
-        "Теперь можно написать: Подготовь заказ поставщику."
+        `✅ Файл получил: ${projectPath}`,
+        "",
+        "Что дальше — просто напиши:",
+        "• «Заказ поставщику» — соберу замовлення Т1 в Excel",
+        "• «Непроданное» — товары без розничных и оптовых продаж за период",
+        "• «Развезти по продажам» — вывезти оттуда, где не продаётся, туда, где продаётся",
+        "• «Перемещение» — список артикулов по листам-магазинам → один документ",
+        "• «Оставь только <текст>» — вырежу все строки, кроме нужных по названию",
+        "• «Аналитика» — краткая сводка по файлу",
+        "• «Найди <текст>» — поиск строк в таблице"
       ].join("\n"),
-      MAIN_KEYBOARD
+      Markup.inlineKeyboard([
+        [Markup.button.callback("📦 Заказ поставщику", SUPPLIER_ORDER_ACTION)],
+        [Markup.button.callback("🗂 Непроданное", DEAD_STOCK_ACTION)],
+        [Markup.button.callback("♻️ Развезти по продажам", REDISTRIBUTE_ACTION)],
+        [Markup.button.callback("🔀 Перемещение", TRANSFER_ACTION)]
+      ])
     );
+  } catch (error) {
+    await handleTelegramError(ctx, error);
+  }
+}
+
+/**
+ * Кнопка «Заказ поставщику» под сообщением о загрузке файла.
+ * @param {import("telegraf").Context} ctx
+ */
+async function handleSupplierOrderAction(ctx) {
+  const chatId = ctx.chat?.id;
+
+  try {
+    await ctx.answerCbQuery("Готовлю заказ...");
+
+    const agent = getAgent(chatId);
+    const answer = await agent.process(SUPPLIER_ORDER_PHRASE);
+
+    await replyAgentAnswer(ctx, answer);
+  } catch (error) {
+    await handleTelegramError(ctx, error);
+  }
+}
+
+/**
+ * Кнопка «Непроданное» под сообщением о загрузке файла.
+ * @param {import("telegraf").Context} ctx
+ */
+async function handleDeadStockAction(ctx) {
+  const chatId = ctx.chat?.id;
+
+  try {
+    await ctx.answerCbQuery("Собираю непроданное...");
+
+    const agent = getAgent(chatId);
+    const answer = await agent.process(DEAD_STOCK_PHRASE);
+
+    await replyAgentAnswer(ctx, answer);
+  } catch (error) {
+    await handleTelegramError(ctx, error);
+  }
+}
+
+/**
+ * Кнопка «Развезти по продажам»: перемещение с нулевых точек на продающие.
+ * @param {import("telegraf").Context} ctx
+ */
+async function handleRedistributeAction(ctx) {
+  const chatId = ctx.chat?.id;
+
+  try {
+    await ctx.answerCbQuery("Считаю перемещение...");
+
+    const agent = getAgent(chatId);
+    const answer = await agent.process(REDISTRIBUTE_PHRASE);
+
+    await replyAgentAnswer(ctx, answer);
+  } catch (error) {
+    await handleTelegramError(ctx, error);
+  }
+}
+
+/**
+ * Кнопка «Перемещение» под сообщением о загрузке файла.
+ * @param {import("telegraf").Context} ctx
+ */
+async function handleTransferAction(ctx) {
+  const chatId = ctx.chat?.id;
+
+  try {
+    await ctx.answerCbQuery("Собираю перемещение...");
+
+    const agent = getAgent(chatId);
+    const answer = await agent.process(TRANSFER_PHRASE);
+
+    await replyAgentAnswer(ctx, answer);
   } catch (error) {
     await handleTelegramError(ctx, error);
   }
@@ -369,6 +481,10 @@ export async function startTelegramBot() {
     );
   });
 
+  bot.action(SUPPLIER_ORDER_ACTION, handleSupplierOrderAction);
+  bot.action(DEAD_STOCK_ACTION, handleDeadStockAction);
+  bot.action(REDISTRIBUTE_ACTION, handleRedistributeAction);
+  bot.action(TRANSFER_ACTION, handleTransferAction);
   bot.on("text", handleTextMessage);
   bot.on("voice", handleSpeechMessage);
   bot.on("audio", handleSpeechMessage);
