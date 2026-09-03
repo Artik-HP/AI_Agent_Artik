@@ -1,5 +1,56 @@
 import { normalizeHeader } from "./reader.js";
 
+/**
+ * @typedef {Record<string, string | number | null | undefined>} RowData
+ */
+
+/**
+ * @typedef {Object} ColumnAliases
+ * @property {string[]} barcode
+ * @property {string[]} category
+ * @property {string[]} minStock
+ * @property {string[]} name
+ * @property {string[]} price
+ * @property {string[]} sku
+ * @property {string[]} stock
+ * @property {string[]} supplier
+ * @property {string[]} targetStock
+ */
+
+/**
+ * @typedef {Object} RowSource
+ * @property {string} file
+ * @property {string} sheet
+ * @property {number} rowNumber
+ */
+
+/**
+ * @typedef {Object} SearchMatch
+ * @property {RowSource} source
+ * @property {RowData} row
+ */
+
+/**
+ * @typedef {Object} SearchOptions
+ * @property {string[]} [columns]
+ * @property {number} [limit]
+ */
+
+/**
+ * @typedef {Object} ExcelSheet
+ * @property {string} name
+ * @property {RowData[]} rows
+ */
+
+/**
+ * @typedef {Object} ExcelWorkbook
+ * @property {string} relativePath
+ * @property {ExcelSheet[]} sheets
+ */
+
+/**
+ * @type {ColumnAliases}
+ */
 export const COLUMN_ALIASES = {
   barcode: [
     "barcode",
@@ -82,19 +133,6 @@ export const COLUMN_ALIASES = {
 };
 
 /**
- * @typedef {Object} RowSource
- * @property {string} file
- * @property {string} sheet
- * @property {number} rowNumber
- */
-
-/**
- * @typedef {Object} SearchMatch
- * @property {RowSource} source
- * @property {Record<string, string>} row
- */
-
-/**
  * @param {string[]} headers
  * @param {string[]} aliases
  * @returns {string|null}
@@ -174,7 +212,7 @@ export function parseNumber(value) {
  * @returns {string}
  */
 export function normalizeLookupValue(value) {
-  return normalizeHeader(value)
+  return normalizeHeader(String(value ?? ""))
     .replace(/\s+/g, "");
 }
 
@@ -249,12 +287,22 @@ export function searchRows(workbooks, query, options = {}) {
   return matches;
 }
 
+/**
+ * @param {import("./reader.js").ExcelWorkbook[]} workbooks
+ * @param {string} query
+ * @returns {SearchMatch[]}
+ */
 export function findProduct(workbooks, query) {
   return searchRows(workbooks, query, {
     columns: COLUMN_ALIASES.name
   });
 }
 
+/**
+ * @param {import("./reader.js").ExcelWorkbook[]} workbooks
+ * @param {string} query
+ * @returns {SearchMatch[]}
+ */
 export function findBrand(workbooks, query) {
   return searchRows(workbooks, query, {
     columns: ["brand", "бренд", "марка"]
