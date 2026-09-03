@@ -72,6 +72,61 @@ function shouldAnalyzeCodebase(lower) {
 }
 
 /**
+ * Ловит намерение "изменить/поменять/исправить" что-то в Excel/CSV-файле —
+ * заказ на редактирование ячеек, а не генерацию нового отчёта.
+ * @param {string} lower
+ * @returns {boolean}
+ */
+function shouldEditExcel(lower) {
+  return (
+    /измени|поменяй|исправь|обнови|замени/.test(lower) &&
+    /артикул|excel|csv|таблиц|файл|ячейк|штрихкод|sku/.test(lower)
+  );
+}
+
+/**
+ * @param {string} lower
+ * @returns {boolean}
+ */
+function shouldUseExcelTool(lower) {
+  return (
+    lower === "/excel" ||
+    lower.startsWith("/excel ") ||
+    lower === "/purchase-order" ||
+    lower.startsWith("/purchase-order ") ||
+    lower.includes("замовлення") ||
+    lower.includes("заказ т1") ||
+    lower.includes("заказ t1") ||
+    lower.includes("заказ по отчету") ||
+    lower.includes("заказ по отчёту") ||
+    lower.includes("отчет о розничных продажах") ||
+    lower.includes("подготовь заказ поставщику") ||
+    lower.includes("сформируй заказ поставщику") ||
+    lower.includes("создай заказ поставщику") ||
+    lower.includes("заказ поставщику") ||
+    shouldEditExcel(lower) ||
+    (
+      (
+        lower.includes("excel") ||
+        lower.includes("csv") ||
+        lower.includes("таблиц") ||
+        lower.includes("остатк") ||
+        lower.includes("прайс")
+      ) &&
+      (
+        lower.includes("поставщик") ||
+        lower.includes("закуп") ||
+        lower.includes("аналит") ||
+        lower.includes("отчет") ||
+        lower.includes("отчёт") ||
+        lower.includes("найди") ||
+        lower.includes("поиск")
+      )
+    )
+  );
+}
+
+/**
  * @param {string} text
  * @param {string} lower
  * @returns {string|null}
@@ -156,6 +211,7 @@ const HELP_TEXT = [
   "/search [запрос] — поиск в интернете",
   "/news [тема] — последние новости",
   "/codebase — проанализировать кодовую базу проекта",
+  "/excel — Excel/CSV: поиск, аналитика, заказ поставщику и редактирование ячеек",
   "/draw [описание] — нарисовать картинку"
 ].join("\n");
 
@@ -410,6 +466,15 @@ if (shouldAnalyzeCodebase(lower)) {
   );
 }
 
+if (shouldUseExcelTool(lower)) {
+  const memories = await memory.getAll(this.chatId);
+
+  return String(await tools.excel.run({
+    query: text,
+    memories
+  }));
+}
+
 if (lower.startsWith("/agent ")) {
   const mode = text.replace("/agent", "").trim().toLowerCase();
 
@@ -562,12 +627,18 @@ const route = await chooseTool(text);
         return `Инструмент "${route.tool}" не найден.`;
       }
 
-const toolResult = await tool.run(route.input);
+const toolInput = route.tool === "excel"
+  ? {
+    query: route.input || text,
+    memories: await memory.getAll(this.chatId)
+  }
+  : route.input;
+const toolResult = await tool.run(toolInput);
 console.log("TOOL:", route.tool);
-console.log("INPUT:", route.input);
+console.log("INPUT:", toolInput);
 console.log("RESULT:", String(toolResult).slice(0, 500));
 
-if (route.tool === "draw") {
+if (route.tool === "draw" || route.tool === "excel") {
   return String(toolResult);
 }
 
@@ -849,6 +920,7 @@ async rememberName(text) {
     "/base64",
     "/db",
     "/codebase",
+    "/excel",
     "/draw"
   ].join("\n");
 }
