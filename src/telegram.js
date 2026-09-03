@@ -38,6 +38,44 @@ const REDISTRIBUTE_ACTION = "redistribute";
 /** Фраза для маршрутизации в перемещение по нулевым продажам. */
 const REDISTRIBUTE_PHRASE = "Перемещение по нулевым продажам.";
 
+/** callback_data кнопки, открывающей меню условий переноса. */
+const CRITERIA_MENU_ACTION = "criteria_menu";
+/** Префикс callback_data пресетов условия. Ограничение Telegram — 64 байта. */
+const CRITERIA_PREFIX = "crit:";
+
+/**
+ * Готовые условия переноса. Кнопка не может нести произвольный порог, поэтому
+ * держим набор частых, а редкие пользователь пишет текстом.
+ * @type {{ id: string, label: string, phrase: string }[]}
+ */
+export const CRITERIA_PRESETS = [
+  {
+    id: "st20",
+    label: "Реализация < 20%",
+    phrase: "Перенеси где реализация<20%"
+  },
+  {
+    id: "st40",
+    label: "Реализация < 40%",
+    phrase: "Перенеси где реализация<40%"
+  },
+  {
+    id: "sales3",
+    label: "Продаж < 3 шт",
+    phrase: "Перенеси где продаж<3"
+  },
+  {
+    id: "days60",
+    label: "Запас > 60 дней",
+    phrase: "Перенеси где запас>60"
+  },
+  {
+    id: "stock10",
+    label: "Остаток > 10 и реализация < 40%",
+    phrase: "Перенеси где остаток>10 реализация<40%"
+  }
+];
+
 const MAIN_KEYBOARD = Markup.keyboard([
   [
     "Агент: default",
@@ -353,6 +391,7 @@ async function handleDocumentMessage(ctx) {
         "• «Заказ поставщику» — соберу замовлення Т1 в Excel",
         "• «Непроданное» — товары без розничных и оптовых продаж за период",
         "• «Развезти по продажам» — вывезти оттуда, где не продаётся, туда, где продаётся",
+        "• «Перенеси с Т5 где реализация<20%» — перенос по условию (реализация, продаж, остаток, запас)",
         "• «Перемещение» — список артикулов по листам-магазинам → один документ",
         "• «Оставь только <текст>» — вырежу все строки, кроме нужных по названию",
         "• «Аналитика» — краткая сводка по файлу",
@@ -362,6 +401,7 @@ async function handleDocumentMessage(ctx) {
         [Markup.button.callback("📦 Заказ поставщику", SUPPLIER_ORDER_ACTION)],
         [Markup.button.callback("🗂 Непроданное", DEAD_STOCK_ACTION)],
         [Markup.button.callback("♻️ Развезти по продажам", REDISTRIBUTE_ACTION)],
+        [Markup.button.callback("🎯 Перенос по условию", CRITERIA_MENU_ACTION)],
         [Markup.button.callback("🔀 Перемещение", TRANSFER_ACTION)]
       ])
     );
@@ -428,6 +468,63 @@ async function handleRedistributeAction(ctx) {
 }
 
 /**
+ * Кнопка «Перенос по условию»: показывает второй ряд кнопок с готовыми
+ * порогами. Одной кнопкой произвольный порог не передать, поэтому меню
+ * двухуровневое, а редкие условия пользователь пишет текстом.
+ * @param {import("telegraf").Context} ctx
+ */
+async function handleCriteriaMenuAction(ctx) {
+  try {
+    await ctx.answerCbQuery("Выбери условие");
+
+    await ctx.reply(
+      [
+        "По какому условию вывозить товар?",
+        "",
+        "Позиция вывозится целиком, объём делится между точками, где она продаётся.",
+        "Свой порог — текстом: «перенеси с Т5 где реализация<15%»."
+      ].join("\n"),
+      Markup.inlineKeyboard(
+        CRITERIA_PRESETS.map(preset => [
+          Markup.button.callback(preset.label, CRITERIA_PREFIX + preset.id)
+        ])
+      )
+    );
+  } catch (error) {
+    await handleTelegramError(ctx, error);
+  }
+}
+
+/**
+ * Кнопка конкретного условия из меню переноса.
+ * @param {import("telegraf").Context} ctx
+ */
+async function handleCriteriaPresetAction(ctx) {
+  const chatId = ctx.chat?.id;
+
+  try {
+    const match = /** @type {RegExpExecArray|undefined} */ (
+      /** @type {unknown} */ (ctx.match)
+    );
+    const preset = CRITERIA_PRESETS.find(item => item.id === String(match?.[1] || ""));
+
+    if (!preset) {
+      await ctx.answerCbQuery("Не знаю такое условие");
+      return;
+    }
+
+    await ctx.answerCbQuery(`Считаю: ${preset.label}`);
+
+    const agent = getAgent(chatId);
+    const answer = await agent.process(preset.phrase);
+
+    await replyAgentAnswer(ctx, answer);
+  } catch (error) {
+    await handleTelegramError(ctx, error);
+  }
+}
+
+/**
  * Кнопка «Перемещение» под сообщением о загрузке файла.
  * @param {import("telegraf").Context} ctx
  */
@@ -484,6 +581,8 @@ export async function startTelegramBot() {
   bot.action(SUPPLIER_ORDER_ACTION, handleSupplierOrderAction);
   bot.action(DEAD_STOCK_ACTION, handleDeadStockAction);
   bot.action(REDISTRIBUTE_ACTION, handleRedistributeAction);
+  bot.action(CRITERIA_MENU_ACTION, handleCriteriaMenuAction);
+  bot.action(new RegExp(`^${CRITERIA_PREFIX}(.+)$`), handleCriteriaPresetAction);
   bot.action(TRANSFER_ACTION, handleTransferAction);
   bot.on("text", handleTextMessage);
   bot.on("voice", handleSpeechMessage);

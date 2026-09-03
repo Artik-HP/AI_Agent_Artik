@@ -31,6 +31,10 @@ import {
   buildRedistribution,
   formatRedistributeResult
 } from "./redistribute.js";
+import {
+  buildCriteriaTransfer,
+  formatCriteriaTransferResult
+} from "./transferByCriteria.js";
 import { searchRows } from "./search.js";
 import { runEdit } from "./editor.js";
 
@@ -42,6 +46,7 @@ const HELP_TEXT = [
   "/excel замовлення data/t1.xlsx",
   "/excel непроданное data/t1.xlsx data/t2.xlsx data/x1.xlsx",
   "/excel перемещение по нулевым продажам data/t1.xlsx data/t2.xlsx",
+  "/excel перенеси с Т5 где реализация<20%",
   "/excel оставь только pjur data/t1.xlsx",
   "/excel аналитика data/ostatki.xlsx data/price.xlsx",
   "/excel поиск товар data/ostatki.xlsx",
@@ -165,6 +170,23 @@ function shouldPrepareSalesOrder(lower) {
 }
 
 /**
+ * «Перенос по критериям»: «перенеси с Т5 где реализация<20%». Отличается от
+ * shouldRedistribute наличием явного условия со сравнением, поэтому проверяется
+ * раньше. Знак «=» намеренно не считается условием: «замовлення реализация=40»
+ * — это переопределение порога заказа, а не перенос.
+ * @param {string} lower
+ * @returns {boolean}
+ */
+function shouldMoveByCriteria(lower) {
+  const hasCondition =
+    /(?:реализац|реалізац|продаж|продал|остат|залиш|запас|дней|днів|sell)[\p{L}]*\s*(?:<=|>=|<|>|меньше|менее|менше|больше|более|більше)\s*\d/u
+      .test(lower);
+  const hasMoveVerb = /перенес|перенес[тьи]|вывез|вывоз|перекид/i.test(lower);
+
+  return hasCondition && (hasMoveVerb || !/замовлення|заказ/i.test(lower));
+}
+
+/**
  * «Перемещение по нулевым продажам»: из отчётов продаж посчитать, что вывезти
  * со складов, где товар не продаётся, туда, где продаётся. Проверять ДО
  * shouldBuildTransfer — фраза «перемещение ... продаж 0» подходит обоим.
@@ -267,6 +289,15 @@ export async function runExcelTool(input) {
       query,
       memories: request.memories
     });
+  }
+
+  if (shouldMoveByCriteria(lower)) {
+    const result = await buildCriteriaTransfer({
+      query,
+      memories: request.memories
+    });
+
+    return formatCriteriaTransferResult(result);
   }
 
   if (shouldRedistribute(lower)) {

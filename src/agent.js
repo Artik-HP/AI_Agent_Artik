@@ -88,7 +88,7 @@ function shouldEditExcel(lower) {
  * @param {string} lower
  * @returns {boolean}
  */
-function shouldUseExcelTool(lower) {
+export function shouldUseExcelTool(lower) {
   return (
     lower === "/excel" ||
     lower.startsWith("/excel ") ||
@@ -116,6 +116,8 @@ function shouldUseExcelTool(lower) {
     lower.includes("keep only") ||
     /перем[іие]щ/i.test(lower) ||
     /перераспредел|развез|разброса|раскида/i.test(lower) ||
+    /перенес|вывез|вывоз/i.test(lower) ||
+    /(?:реализац|реалізац|продаж|остат|залиш|запас)[\p{L}]*\s*(?:<=|>=|<|>)\s*\d/u.test(lower) ||
     lower.includes("перекинь") ||
     lower.includes("документ перемещения") ||
     shouldEditExcel(lower) ||
