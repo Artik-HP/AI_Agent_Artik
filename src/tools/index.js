@@ -12,6 +12,7 @@ import { searchYouTube } from "./youtube.js";
 import { analyzeCodebase } from "./codeAnalyzer.js";
 import webReader from "./webReader.js";
 import drawImage from "./drawImage.js";
+import excelTool from "./excel/excelTool.js";
 
 
 
@@ -96,6 +97,11 @@ codebase: {
 draw: {
   description: "Генерирует картинку по текстовому описанию",
   run: async input => drawImage.run(input ?? "")
+},
+
+excel: {
+  description: "Работает с Excel/CSV: поиск, аналитика, заказ поставщику и замовлення Т1",
+  run: async input => excelTool.run(input)
 },
 };
 

@@ -1,5 +1,9 @@
+import fs from "node:fs";
+import path from "node:path";
+
 import { Markup, Telegraf } from "telegraf";
 import Agent from "./agent.js";
+import * as memory from "./memory.js";
 import {
   detectAudioFormat,
   transcribeAudio
@@ -8,6 +12,11 @@ import { splitMessage }
   from "./utils/splitMessage.js";
 
 const agents = new Map();
+const SPREADSHEET_EXTENSIONS = new Set([
+  ".csv",
+  ".xls",
+  ".xlsx"
+]);
 
 const MAIN_KEYBOARD = Markup.keyboard([
   [
@@ -97,10 +106,79 @@ function getImageReply(answer) {
 }
 
 /**
+ * @param {string} answer
+ * @returns {{filePath: string, fileName: string, caption: string}|null}
+ */
+function getDocumentReply(answer) {
+  const match = answer.match(/^Excel-файл:\s*(.+\.xlsx)\s*$/m);
+
+  if (!match) {
+    return null;
+  }
+
+  const filePath = path.resolve(String(match[1]).trim());
+
+  if (!fs.existsSync(filePath)) {
+    return null;
+  }
+
+  return {
+    filePath,
+    fileName: path.basename(filePath),
+    caption: answer
+      .replace(/^Excel-файл:\s*.+\.xlsx\s*$/m, "Excel-файл прикреплён.")
+      .slice(0, 1000)
+  };
+}
+
+/**
+ * @param {string|undefined} fileName
+ * @returns {boolean}
+ */
+function isSpreadsheetDocument(fileName) {
+  return SPREADSHEET_EXTENSIONS.has(
+    path.extname(String(fileName || "")).toLowerCase()
+  );
+}
+
+/**
+ * @param {string} value
+ * @returns {string}
+ */
+function sanitizeFileName(value) {
+  return String(value || "table.xlsx")
+    .replace(/[<>:"/\\|?*]/g, "_")
+    .split("")
+    .filter(char => char.charCodeAt(0) >= 32)
+    .join("")
+    .slice(0, 120);
+}
+
+/**
  * @param {import("telegraf").Context} ctx
  * @param {string} answer
  */
 async function replyAgentAnswer(ctx, answer) {
+  const documentReply = getDocumentReply(answer);
+
+  if (documentReply) {
+    try {
+      await ctx.replyWithDocument(
+        {
+          source: documentReply.filePath,
+          filename: documentReply.fileName
+        },
+        {
+          caption: documentReply.caption,
+          ...MAIN_KEYBOARD
+        }
+      );
+      return;
+    } catch (error) {
+      console.error("Telegram document reply error:", error);
+    }
+  }
+
   const imageReply = getImageReply(answer);
 
   if (!imageReply) {
@@ -133,7 +211,7 @@ async function downloadTelegramFile(fileId, ctx) {
 
   if (!response.ok) {
     throw new Error(
-      `Не удалось скачать аудио из Telegram: ${response.status}`
+      `Не удалось скачать файл из Telegram: ${response.status}`
     );
   }
 
@@ -196,6 +274,68 @@ async function handleSpeechMessage(ctx) {
 
 /**
  * @param {import("telegraf").Context} ctx
+ */
+async function handleDocumentMessage(ctx) {
+  const message = ctx.message;
+  const document = message && "document" in message
+    ? message.document
+    : null;
+  const chatId = ctx.chat?.id;
+
+  if (!document) {
+    return;
+  }
+
+  const originalFileName = document.file_name || "table.xlsx";
+
+  if (!isSpreadsheetDocument(originalFileName)) {
+    await ctx.reply(
+      "Сейчас я принимаю Excel/CSV-файлы: .xlsx, .xls или .csv."
+    );
+    return;
+  }
+
+  try {
+    const fileBuffer = await downloadTelegramFile(document.file_id, ctx);
+    const uploadDir = path.resolve(
+      process.cwd(),
+      "data",
+      "telegram",
+      String(chatId || "default")
+    );
+    const fileName = `${Date.now()}-${sanitizeFileName(originalFileName)}`;
+    const filePath = path.join(uploadDir, fileName);
+
+    fs.mkdirSync(uploadDir, {
+      recursive: true
+    });
+    fs.writeFileSync(filePath, fileBuffer);
+
+    const projectPath = path
+      .relative(process.cwd(), filePath)
+      .split(path.sep)
+      .join("/");
+
+    await memory.save(
+      `Excel файл загружен: ${projectPath}`,
+      chatId
+    );
+
+    await ctx.reply(
+      [
+        `Файл загружен: ${projectPath}`,
+        "Я сохранил путь в память.",
+        "Теперь можно написать: Подготовь заказ поставщику."
+      ].join("\n"),
+      MAIN_KEYBOARD
+    );
+  } catch (error) {
+    await handleTelegramError(ctx, error);
+  }
+}
+
+/**
+ * @param {import("telegraf").Context} ctx
  * @param {unknown} error
  */
 async function handleTelegramError(ctx, error) {
@@ -232,27 +372,12 @@ export async function startTelegramBot() {
   bot.on("text", handleTextMessage);
   bot.on("voice", handleSpeechMessage);
   bot.on("audio", handleSpeechMessage);
-console.log("TOKEN:", token ? "есть" : "нет");
-console.log("1. Создаем Telegraf");
-const bot = new Telegraf(token);
+  bot.on("document", handleDocumentMessage);
 
-console.log("2. Регистрируем обработчики");
-
-process.once("SIGINT", () => bot.stop("SIGINT"));
-process.once("SIGTERM", () => bot.stop("SIGTERM"));
-
-bot.start(ctx => {
-  return ctx.reply(
-    "Привет! Я AI_Agent_JS 🤖\nВыбери агента, открой команды или попроси нарисовать картинку.",
-    MAIN_KEYBOARD
-  );
-});
-
-bot.on("text", handleTextMessage);
-bot.on("voice", handleSpeechMessage);
-bot.on("audio", handleSpeechMessage);
-
-console.log("3. Перед launch");
+  console.log("TOKEN:", token ? "есть" : "нет");
+  console.log("1. Создаем Telegraf");
+  console.log("2. Регистрируем обработчики");
+  console.log("3. Перед launch");
 
 await bot.launch();
 
