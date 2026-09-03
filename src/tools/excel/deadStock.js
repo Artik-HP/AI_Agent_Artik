@@ -39,6 +39,23 @@ const END_LABELS = [
   "кінець"
 ].map(normalizeHeader);
 
+/** Базовые колонки движения — нужны, чтобы посчитать реализацию и запас. */
+const START_LABELS = [
+  "начало",
+  "початок"
+].map(normalizeHeader);
+
+const RECEIPT_LABELS = [
+  "приход",
+  "прихід"
+].map(normalizeHeader);
+
+const EXPENSE_LABELS = [
+  "расход",
+  "розхід",
+  "витрата"
+].map(normalizeHeader);
+
 /** Первые две колонки выгрузки BAS — всегда артикул и наименование. */
 const SKU_HEADER = "Артикул";
 const NAME_HEADER = "Наименование";
@@ -55,6 +72,9 @@ const EXTRA_HEADERS = ["Точка", "Файл", "Розница за перио
  * @property {number} retail розничные продажи в этой строке
  * @property {number} wholesale продажи покупателю в этой строке
  * @property {number} end остаток на конец периода
+ * @property {number} start остаток на начало периода
+ * @property {number} receipt приход за период
+ * @property {number} expense расход за период (всё, что ушло со склада)
  * @property {Record<string, string>} cells все ячейки строки по display-заголовку
  */
 
@@ -194,6 +214,15 @@ function readReportSheet(sheet, context) {
   const endIndex = normalized.findIndex(header =>
     END_LABELS.some(label => header === label || header.includes(label))
   );
+  const startIndex = normalized.findIndex(header =>
+    START_LABELS.some(label => header === label || header.includes(label))
+  );
+  const receiptIndex = normalized.findIndex(header =>
+    RECEIPT_LABELS.some(label => header === label || header.includes(label))
+  );
+  const expenseIndex = normalized.findIndex(header =>
+    EXPENSE_LABELS.some(label => header === label || header.includes(label))
+  );
 
   // Точка листа — стартовая; строка-склад внутри листа перебивает её, она
   // конкретнее (выгрузка одной вкладкой может содержать несколько складов).
@@ -227,6 +256,9 @@ function readReportSheet(sheet, context) {
       retail: retailIndex === -1 ? 0 : parseNumber(row[retailIndex]) || 0,
       wholesale: wholesaleIndex === -1 ? 0 : parseNumber(row[wholesaleIndex]) || 0,
       end: endIndex === -1 ? 0 : parseNumber(row[endIndex]) || 0,
+      start: startIndex === -1 ? 0 : parseNumber(row[startIndex]) || 0,
+      receipt: receiptIndex === -1 ? 0 : parseNumber(row[receiptIndex]) || 0,
+      expense: expenseIndex === -1 ? 0 : parseNumber(row[expenseIndex]) || 0,
       cells
     });
   }

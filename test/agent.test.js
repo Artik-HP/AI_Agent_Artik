@@ -5,9 +5,9 @@ import test from "node:test";
 
 import ExcelJS from "exceljs";
 
-import Agent from "../src/agent.js";
+import Agent, { shouldUseExcelTool } from "../src/agent.js";
 import * as memory from "../src/memory.js";
-import { sanitizeFileName } from "../src/telegram.js";
+import { CRITERIA_PRESETS, sanitizeFileName } from "../src/telegram.js";
 import {
   existsInProject,
   extractNamedSpreadsheetPaths,
@@ -16,6 +16,7 @@ import {
 } from "../src/tools/excel/reader.js";
 import { extractKeepPhrase } from "../src/tools/excel/filterByName.js";
 import { allocateProportionally } from "../src/tools/excel/redistribute.js";
+import { parseCriteria } from "../src/tools/excel/transferByCriteria.js";
 
 delete process.env.DATABASE_URL;
 delete process.env.DATABASE_SSL;
@@ -706,6 +707,97 @@ test("redistribution moves dead stock to the stores that sell it", async () => {
   // [Со склада, На склад, Артикул, Название, Кол-во, Остаток источника, Продажи получателя]
   assert.deepEqual(rows[0], ["Т5", "Т1", "SKU-A", "Товар А", 4, 5, 6]);
   assert.deepEqual(rows[1], ["Т5", "Т7", "SKU-A", "Товар А", 1, 5, 2]);
+
+  fs.rmSync(fileMatch[1], { force: true });
+  fs.rmSync(tempDir, { recursive: true, force: true });
+});
+
+test("every criteria button phrase routes to the criteria transfer", () => {
+  assert.ok(CRITERIA_PRESETS.length > 0);
+
+  for (const preset of CRITERIA_PRESETS) {
+    const lower = preset.phrase.toLowerCase();
+
+    // Кнопка бесполезна, если её фраза не доедет до excel-инструмента или
+    // доедет без условия — тогда ответ уйдёт в модель или в другую команду.
+    assert.ok(shouldUseExcelTool(lower), `не маршрутизируется: ${preset.phrase}`);
+    assert.ok(
+      parseCriteria(preset.phrase).length > 0,
+      `условие не разобрано: ${preset.phrase}`
+    );
+    assert.ok(
+      Buffer.byteLength(`crit:${preset.id}`, "utf8") <= 64,
+      `callback_data длиннее 64 байт: ${preset.id}`
+    );
+  }
+});
+
+test("parseCriteria reads thresholds and normalizes percents", () => {
+  assert.deepEqual(
+    parseCriteria("перенеси с Т5 реализация<20%").map(item =>
+      [item.field, item.op, item.value]
+    ),
+    [["sellThrough", "<", 0.2]]
+  );
+  // «20» без знака процента для реализации значит те же 20%, «0.2» — уже доля.
+  assert.equal(parseCriteria("реализация<20")[0].value, 0.2);
+  assert.equal(parseCriteria("реализация<0.2")[0].value, 0.2);
+  // Словесные операторы и несколько условий сразу.
+  assert.deepEqual(
+    parseCriteria("остаток больше 10 продаж меньше 3").map(item =>
+      [item.field, item.op, item.value]
+    ),
+    [["retail", "<", 3], ["end", ">", 10]]
+  );
+  assert.deepEqual(parseCriteria("перенеси всё что залежалось"), []);
+});
+
+test("criteria transfer moves low sell-through stock off the named store", async () => {
+  const tempDir = path.join(process.cwd(), "test", ".tmp-criteria");
+  const header = ["Місце зберігання", "", "Начало", "Приход", "Расход",
+    "Отчет о розничных продажах", "Продажа покупателю", "Конец"];
+
+  fs.rmSync(tempDir, { recursive: true, force: true });
+
+  const t1 = path.join(tempDir, "t1.xlsx");
+  const t5 = path.join(tempDir, "t5.xlsx");
+  const t7 = path.join(tempDir, "t7.xlsx");
+
+  // Т5: PJ-1 реализация 10% (2 из 20) — под условие; SO-2 80% — мимо.
+  await writeSalesReportWorkbook(t5, "Т5", header, [
+    ["PJ-1", "Гель", 20, 0, 2, 2, 0, 18],
+    ["SO-2", "Пробка", 10, 0, 8, 8, 0, 2]
+  ]);
+  await writeSalesReportWorkbook(t1, "Т1", header, [
+    ["PJ-1", "Гель", 10, 0, 6, 6, 0, 4]
+  ]);
+  await writeSalesReportWorkbook(t7, "Т7", header, [
+    ["PJ-1", "Гель", 5, 0, 2, 2, 0, 3]
+  ]);
+
+  const agent = new Agent();
+  const answer = await agent.process(
+    `/excel перенеси с Т5 где реализация<20% ${t1} ${t5} ${t7}`
+  );
+  const fileMatch = answer.match(/^Excel-файл:\s*(.+\.xlsx)\s*$/m);
+
+  assert.match(answer, /Перенос по критериям готов/);
+  assert.match(answer, /Условие: Реализация < 20%/);
+  assert.match(answer, /Со склада: Т5/);
+  // 18 штук делятся 6:2 между Т1 и Т7 -> 14 и 4. SO-2 отсеян по реализации.
+  assert.match(answer, /Строк переноса: 2, единиц: 18/);
+  assert.ok(fileMatch);
+
+  const workbook = await new ExcelJS.Workbook().xlsx.readFile(fileMatch[1]);
+  const worksheet = workbook.getWorksheet("Перенос");
+  const rows = [];
+  worksheet.eachRow((row, index) => {
+    if (index > 1) rows.push(row.values.slice(1, 8));
+  });
+
+  // [Со склада, На склад, Артикул, Название, Кол-во, Реализация, Остаток]
+  assert.deepEqual(rows[0], ["Т5", "Т1", "PJ-1", "Гель", 14, 0.1, 18]);
+  assert.deepEqual(rows[1], ["Т5", "Т7", "PJ-1", "Гель", 4, 0.1, 18]);
 
   fs.rmSync(fileMatch[1], { force: true });
   fs.rmSync(tempDir, { recursive: true, force: true });
