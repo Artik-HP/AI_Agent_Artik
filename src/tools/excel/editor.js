@@ -5,6 +5,7 @@ import ExcelJS from "exceljs";
 
 import {
   discoverSpreadsheetFiles,
+  existsInProject,
   extractSpreadsheetPaths,
   loadWorkbooks,
   normalizeHeader,
@@ -62,11 +63,13 @@ function describeWorkbooksForModel(workbooks) {
  */
 export async function buildEditPlan(request) {
   const files = [
-    ...extractSpreadsheetPaths(request.query),
-    ...extractSpreadsheetPaths(request.memories.join("\n"))
-  ];
+    ...new Set([
+      ...extractSpreadsheetPaths(request.query),
+      ...extractSpreadsheetPaths(request.memories.join("\n"))
+    ])
+  ].filter(existsInProject);
 
-  const targetFiles = files.length > 0 ? [...new Set(files)] : discoverSpreadsheetFiles();
+  const targetFiles = files.length > 0 ? files : discoverSpreadsheetFiles();
 
   if (targetFiles.length === 0) {
     return { edits: [] };

@@ -7,10 +7,15 @@ import ExcelJS from "exceljs";
 
 import Agent from "../src/agent.js";
 import * as memory from "../src/memory.js";
+import { sanitizeFileName } from "../src/telegram.js";
 import {
+  existsInProject,
   extractNamedSpreadsheetPaths,
-  extractSpreadsheetPaths
+  extractSpreadsheetPaths,
+  loadWorkbooks
 } from "../src/tools/excel/reader.js";
+import { extractKeepPhrase } from "../src/tools/excel/filterByName.js";
+import { allocateProportionally } from "../src/tools/excel/redistribute.js";
 
 delete process.env.DATABASE_URL;
 delete process.env.DATABASE_SSL;
@@ -32,6 +37,43 @@ test("excel path extraction keeps Telegram paths with spaces", () => {
     extractNamedSpreadsheetPaths(`остатки=${filePath}`, ["остатки"]),
     [filePath]
   );
+});
+
+test("comma in a Telegram file name does not spawn a bogus path", () => {
+  const original = "Т1_продажі_16_08_2_09_2026_проставлені_формули,_фільтр_більше_40%.xlsx";
+  const stored = `data/telegram/8648503864/1788439603766-${sanitizeFileName(original)}`;
+  const memoryText = `Excel файл загружен: ${stored}`;
+
+  assert.ok(!stored.includes(","), "запятая должна быть вычищена из имени");
+  assert.deepEqual(extractSpreadsheetPaths(memoryText), [stored]);
+});
+
+test("existsInProject rejects missing and out-of-project paths", () => {
+  assert.equal(existsInProject("_фільтр_більше_40%.xlsx"), false);
+  assert.equal(existsInProject("../../etc/passwd.xlsx"), false);
+  assert.equal(existsInProject("package.json"), true);
+});
+
+test("loadWorkbooks skips stale paths, never echoes the bad name", async () => {
+  const dir = path.join(process.cwd(), "test", ".tmp-stale");
+  const good = path.join(dir, "real.xlsx");
+
+  fs.rmSync(dir, { recursive: true, force: true });
+  await writeTestWorkbook(good, "Лист", [{ "Артикул": "A1", "Остаток": 5 }]);
+
+  const goodPath = path.relative(process.cwd(), good).split(path.sep).join("/");
+  const bad = "_фільтр_більше_40%.xlsx";
+
+  // Только битый путь из памяти -> обобщённая ошибка, без самого пути.
+  assert.throws(
+    () => loadWorkbooks([bad]),
+    error => !/_фільтр/.test(error.message) && /Отправь отчёт боту заново/.test(error.message)
+  );
+
+  // Битый рядом с реальным -> реальный грузится, битый молча пропущен.
+  assert.equal(loadWorkbooks([goodPath, bad]).length, 1);
+
+  fs.rmSync(dir, { recursive: true, force: true });
 });
 
 test("agent remembers and recalls text", async () => {
@@ -117,6 +159,9 @@ async function writeTestWorkbook(filePath, sheetName, rows) {
   await workbook.xlsx.writeFile(filePath);
 }
 
+// Реалистичный «сырой» отчёт движения (как выгрузка из BAS): только базовые
+// колонки, без заранее проставленных формул оборачиваемости. Колонка «Конец»
+// стоит на позиции 10 — проверяем определение колонок по заголовкам.
 async function writeT1ReportWorkbook(filePath) {
   const workbook = new ExcelJS.Workbook();
   const worksheet = workbook.addWorksheet("TDSheet");
@@ -127,15 +172,13 @@ async function writeT1ReportWorkbook(filePath) {
       "",
       "Начало",
       "Приход",
+      "Оприходование запасов",
       "Поступление от поставщика",
-      "",
       "Расход",
       "Отчет о розничных продажах",
       "Продажа покупателю",
-      "Конец",
-      "",
-      "",
-      ""
+      "Списание запасов",
+      "Конец"
     ],
     [
       "Номенклатура.Артикул",
@@ -143,105 +186,27 @@ async function writeT1ReportWorkbook(filePath) {
       "Кількість",
       "Кількість",
       "Кількість",
-      "",
       "Кількість",
       "Кількість",
       "Кількість",
       "Кількість",
-      "",
-      "",
-      ""
+      "Кількість",
+      "Кількість"
     ],
-    [
-      "Toppers 01 Lviv Gnatuka",
-      "",
-      10,
-      3,
-      3,
-      13,
-      4,
-      4,
-      "",
-      9,
-      3.25,
-      58.5,
-      0.31
-    ],
-    [
-      "SO-FAST",
-      "Быстрый товар",
-      2,
-      "",
-      "",
-      2,
-      2,
-      2,
-      "",
-      0,
-      1,
-      18,
-      1
-    ],
-    [
-      "SO-SLOW",
-      "Медленный товар",
-      6,
-      "",
-      "",
-      6,
-      1,
-      1,
-      "",
-      5,
-      6,
-      108,
-      0.16
-    ],
-    [
-      "SX-ZERO-DAYS",
-      "Продажа без розничного отчёта",
-      1,
-      "",
-      "",
-      1,
-      1,
-      "",
-      1,
-      0,
-      "",
-      "",
-      0
-    ],
-    [
-      "AA-FAST",
-      "Не тот префикс",
-      1,
-      "",
-      "",
-      1,
-      1,
-      1,
-      "",
-      0,
-      1,
-      18,
-      1
-    ],
-    [
-      "PJ-FAST",
-      "Быстрый PJ товар",
-      4,
-      "",
-      "",
-      4,
-      2,
-      2,
-      "",
-      1,
-      2,
-      36,
-      0.5
-    ]
+    // Строка-заголовок склада: во второй колонке пусто — не товар.
+    ["ТТ-01 Львів", "", 100, 10, 0, 10, 50, 45, 5, 0, 60],
+    // Подходит: префикс SO, есть расход, запас в норме.
+    ["SO-1001", "Товар SO швидкий", 8, 0, 0, 0, 6, 6, 0, 0, 2],
+    // Отсеивается: затоварен (оборот 20 периодов -> > maxStockDays).
+    ["SO-1002", "Товар SO затоварений", 40, 0, 0, 0, 2, 2, 0, 0, 38],
+    // Подходит: префикс SX.
+    ["SX-2001", "Товар SX", 5, 5, 0, 5, 4, 3, 1, 0, 6],
+    // Отсеивается: нет продаж за период (расход = 0).
+    ["AD-3001", "Товар AD без продажу", 3, 0, 0, 0, 0, 0, 0, 0, 3],
+    // Отсеивается: чужой префикс.
+    ["ZZ-9001", "Чужий бренд", 5, 0, 0, 0, 5, 5, 0, 0, 0],
+    // Подходит: префикс PJ.
+    ["PJ-4001", "Товар PJ", 4, 0, 0, 0, 3, 3, 0, 0, 1]
   ]);
 
   fs.mkdirSync(path.dirname(filePath), {
@@ -406,7 +371,9 @@ test("agent prepares T1 sales order from remembered Telegram report", async () =
   const fileMatch = answer.match(/^Excel-файл:\s*(.+\.xlsx)\s*$/m);
 
   assert.match(answer, /Замовлення Т1 подготовлено/);
-  assert.match(answer, /Позиции: 2/);
+  assert.match(answer, /Позиции: 3/);
+  // Период вычислен из дат в имени файла (18.06-5.07 -> 18 дней).
+  assert.match(answer, /Период отчёта: 18 дн\./);
   assert.ok(fileMatch);
   assert.ok(fs.existsSync(fileMatch[1]));
 
@@ -445,19 +412,27 @@ test("agent prepares T1 sales order from movement report", async () => {
   const fileMatch = answer.match(/^Excel-файл:\s*(.+\.xlsx)\s*$/m);
 
   assert.match(answer, /Замовлення Т1 подготовлено/);
-  assert.match(answer, /Позиции: 2/);
-  assert.match(answer, /Рекомендовано к заказу: 7/);
+  // PJ-4001, SX-2001, SO-1001. SO-1002 отсеян по реализации <40%, AD-3001 без
+  // продаж, ZZ-9001 с чужим префиксом.
+  assert.match(answer, /Позиции: 3/);
+  assert.match(answer, /Рекомендовано к заказу: 17 ед\./);
+  assert.match(answer, /<40% реализации — 1/);
   assert.ok(fileMatch);
   assert.ok(fs.existsSync(fileMatch[1]));
 
   const workbook = await new ExcelJS.Workbook().xlsx.readFile(fileMatch[1]);
   const worksheet = workbook.getWorksheet("Замовлення");
 
-  assert.equal(worksheet.getCell("A2").value, "SO-FAST");
-  assert.equal(worksheet.getCell("A3").value, "PJ-FAST");
-  assert.equal(worksheet.getCell("M2").value.result, 4);
+  // Сортировка по рангу префикса из config.yaml: PJ -> SX -> SO.
+  assert.equal(worksheet.getCell("A2").value, "PJ-4001");
+  assert.equal(worksheet.getCell("A3").value, "SX-2001");
+  assert.equal(worksheet.getCell("A4").value, "SO-1001");
   assert.match(worksheet.getCell("M2").value.formula, /ROUNDUP/);
-  assert.equal(worksheet.getCell("M3").value.result, 3);
+  // baseline computeRecommendedOrder = ceil(Расход*2 - Конец):
+  // PJ ceil(3*2-1)=5, SX ceil(4*2-6)=2, SO ceil(6*2-2)=10.
+  assert.equal(worksheet.getCell("M2").value.result, 5);
+  assert.equal(worksheet.getCell("M3").value.result, 2);
+  assert.equal(worksheet.getCell("M4").value.result, 10);
 
   fs.rmSync(fileMatch[1], {
     force: true
@@ -473,4 +448,265 @@ test("agent prepares T1 sales order from movement report", async () => {
     recursive: true,
     force: true
   });
+});
+
+test("agent explains why a T1 report produced no order", async () => {
+  const tempDir = path.join(process.cwd(), "test", ".tmp-t1-diag");
+  const reportFile = path.join(tempDir, "t1-report.xlsx");
+
+  fs.rmSync(tempDir, {
+    recursive: true,
+    force: true
+  });
+
+  await writeT1ReportWorkbook(reportFile);
+
+  const agent = new Agent();
+  // В отчёте есть товары, но задан префикс, которого нет ни у одного артикула.
+  const answer = await agent.process(
+    `/excel замовлення prefixes=QQ ${reportFile}`
+  );
+
+  assert.match(answer, /Замовлення Т1 не сформировано/);
+  assert.match(answer, /ни один артикул не начинается с QQ/);
+  assert.doesNotMatch(answer, /Excel-файл:/);
+
+  fs.rmSync(tempDir, {
+    recursive: true,
+    force: true
+  });
+});
+
+/**
+ * Мини-отчёт движения: строка-склад + товары. Колонки задаём как есть, чтобы
+ * проверить и объединение разных раскладок между файлами.
+ */
+async function writeSalesReportWorkbook(filePath, section, header, productRows) {
+  const workbook = new ExcelJS.Workbook();
+  const worksheet = workbook.addWorksheet("TDSheet");
+
+  worksheet.addRow(header);
+  worksheet.addRow(["Номенклатура.Артикул", "Номенклатура.Найменування"]);
+  worksheet.addRow([section, "", ...header.slice(2).map(() => 0)]);
+  productRows.forEach(row => worksheet.addRow(row));
+
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  await workbook.xlsx.writeFile(filePath);
+}
+
+test("dead-stock report merges files and keeps only unsold products", async () => {
+  const tempDir = path.join(process.cwd(), "test", ".tmp-dead");
+  const fileA = path.join(tempDir, "t1-report.xlsx");
+  const fileB = path.join(tempDir, "t2-report.xlsx");
+
+  fs.rmSync(tempDir, { recursive: true, force: true });
+
+  // A: розница/опт по колонкам 7/8. SKU-1 продан в рознице, SKU-2 — ноль.
+  await writeSalesReportWorkbook(
+    fileA,
+    "Точка А",
+    ["Місце зберігання", "", "Начало", "Приход", "Расход",
+      "Отчет о розничных продажах", "Продажа покупателю", "Конец"],
+    [
+      ["SKU-1", "Проданный в рознице", 5, 0, 2, 2, 0, 3],
+      ["SKU-2", "Мёртвый в А", 4, 0, 0, 0, 0, 4],
+      ["SKU-3", "Только опт", 6, 0, 1, 0, 1, 5]
+    ]
+  );
+
+  // B: другая раскладка (лишняя колонка «Списание запасов»). SKU-2 опять ноль,
+  // но продан оптом -> из списка вылетает. SKU-4 мёртв только в B.
+  await writeSalesReportWorkbook(
+    fileB,
+    "Точка Б",
+    ["Місце зберігання", "", "Начало", "Приход", "Расход", "Списание запасов",
+      "Отчет о розничных продажах", "Продажа покупателю", "Конец"],
+    [
+      ["SKU-2", "Мёртвый в А, опт в Б", 3, 0, 1, 0, 0, 1, 2],
+      ["SKU-4", "Мёртвый в Б", 2, 0, 0, 0, 0, 0, 2]
+    ]
+  );
+
+  const agent = new Agent();
+  const answer = await agent.process(`/excel непроданное ${fileA} ${fileB}`);
+  const fileMatch = answer.match(/^Excel-файл:\s*(.+\.xlsx)\s*$/m);
+
+  assert.match(answer, /Отчёт по непроданному товару готов/);
+  assert.ok(fileMatch);
+
+  const workbook = await new ExcelJS.Workbook().xlsx.readFile(fileMatch[1]);
+  const worksheet = workbook.getWorksheet("Непродано");
+  const skuColumn = worksheet.getRow(1).values.indexOf("Артикул");
+  const skus = [];
+  worksheet.eachRow((row, index) => {
+    if (index > 1) skus.push(row.getCell(skuColumn).value);
+  });
+
+  // SKU-2 продан оптом в Б -> исключён. SKU-1/SKU-3 продавались -> исключены.
+  assert.deepEqual(skus.sort(), ["SKU-4"]);
+  // Объединение раскладок: колонка из файла Б попала в шапку.
+  assert.ok(worksheet.getRow(1).values.includes("Списание запасов"));
+
+  fs.rmSync(fileMatch[1], { force: true });
+  fs.rmSync(tempDir, { recursive: true, force: true });
+});
+
+test("extractKeepPhrase strips the command and file path", () => {
+  assert.equal(extractKeepPhrase("оставь только pjur data/t1.xlsx"), "pjur");
+  assert.equal(extractKeepPhrase("/excel удали всё кроме \"Obsessive\" a.xlsx"), "Obsessive");
+  assert.equal(extractKeepPhrase("оставить только Sorry i am virgin"), "Sorry i am virgin");
+  assert.equal(extractKeepPhrase("keep only pjur"), "pjur");
+  // без искомого текста — пусто, бот попросит уточнить
+  assert.equal(extractKeepPhrase("оставь только data/t1.xlsx"), "");
+});
+
+test("filter keeps only rows whose name contains the phrase", async () => {
+  const tempDir = path.join(process.cwd(), "test", ".tmp-filter");
+  const reportFile = path.join(tempDir, "t1-report.xlsx");
+
+  fs.rmSync(tempDir, { recursive: true, force: true });
+  await writeSalesReportWorkbook(
+    reportFile,
+    "Точка А",
+    ["Місце зберігання", "", "Начало", "Расход",
+      "Отчет о розничных продажах", "Конец"],
+    [
+      ["PJ10050", "Змазка pjur Original 30 мл", 3, 1, 1, 2],
+      ["PJ10160", "Змазка pjur Woman 30 мл", 4, 2, 2, 2],
+      ["SO5671", "Лубрикант Swiss Navy 946 мл", 5, 0, 0, 5],
+      ["108", "шкарпетки Twerk 35-39", 1, 0, 0, 1]
+    ]
+  );
+
+  const agent = new Agent();
+  const answer = await agent.process(`/excel оставь только pjur ${reportFile}`);
+  const fileMatch = answer.match(/^Excel-файл:\s*(.+\.xlsx)\s*$/m);
+
+  assert.match(answer, /Оставил только строки с «pjur»/);
+  assert.match(answer, /Оставлено строк: 2/);
+  assert.ok(fileMatch);
+
+  const workbook = await new ExcelJS.Workbook().xlsx.readFile(fileMatch[1]);
+  const worksheet = workbook.getWorksheet("Отфильтровано");
+  const headerValues = worksheet.getRow(1).values;
+  const nameColumn = headerValues.findIndex(
+    value => /найменування|наименование/i.test(String(value || ""))
+  );
+  const names = [];
+  worksheet.eachRow((row, index) => {
+    if (index > 1) names.push(row.getCell(nameColumn).value);
+  });
+
+  assert.equal(names.length, 2);
+  assert.ok(names.every(name => /pjur/i.test(String(name))));
+  // все исходные колонки на месте
+  assert.ok(headerValues.includes("Конец"));
+
+  fs.rmSync(fileMatch[1], { force: true });
+  fs.rmSync(tempDir, { recursive: true, force: true });
+});
+
+test("transfer doc flattens per-sheet SKU lists into one table", async () => {
+  const tempDir = path.join(process.cwd(), "test", ".tmp-transfer");
+  const file = path.join(tempDir, "переміщення з Т11.xlsx");
+
+  fs.rmSync(tempDir, { recursive: true, force: true });
+  fs.mkdirSync(tempDir, { recursive: true });
+
+  const workbook = new ExcelJS.Workbook();
+  const sheetA = workbook.addWorksheet("на Т9");
+  sheetA.addRows([["SX0657"], ["SO4837", "пробка"]]);
+  const sheetB = workbook.addWorksheet("не знаю");
+  // кривая строка: название в колонке A, артикул в колонке D
+  sheetB.addRows([["PJ11290", "анал 250"], ["воскова свічка Art of Sex M", "", "", "SO5955"]]);
+  await workbook.xlsx.writeFile(file);
+
+  const agent = new Agent();
+  const answer = await agent.process(`/excel перемещение ${file}`);
+  const fileMatch = answer.match(/^Excel-файл:\s*(.+\.xlsx)\s*$/m);
+
+  assert.match(answer, /Документ перемещения готов/);
+  assert.match(answer, /Со склада: Т11/);
+  assert.ok(fileMatch);
+
+  const out = await new ExcelJS.Workbook().xlsx.readFile(fileMatch[1]);
+  const sheet = out.getWorksheet("Перемещение");
+  const rows = [];
+  sheet.eachRow((row, index) => {
+    if (index > 1) rows.push(row.values.slice(1, 7).map(v => (v == null ? "" : String(v))));
+  });
+
+  // [Со склада, На склад, Артикул, Название, Кол-во, Примечание]
+  assert.deepEqual(rows[0], ["Т11", "Т9", "SX0657", "", "", ""]);
+  assert.deepEqual(rows[1], ["Т11", "Т9", "SO4837", "", "", "пробка"]);
+  assert.deepEqual(rows[2], ["Т11", "не знаю", "PJ11290", "", "", "анал 250"]);
+  // артикул вытащен из колонки D, имя ушло в примечание
+  assert.deepEqual(rows[3], ["Т11", "не знаю", "SO5955", "", "", "воскова свічка Art of Sex M"]);
+
+  fs.rmSync(fileMatch[1], { force: true });
+  fs.rmSync(tempDir, { recursive: true, force: true });
+});
+
+test("allocateProportionally splits without losing or inventing units", () => {
+  // 5 единиц между продажами 6 и 2: 3.75 / 1.25 -> 4 и 1
+  assert.deepEqual(allocateProportionally(5, [6, 2]), [4, 1]);
+  // одна единица достаётся лучшему по продажам
+  assert.deepEqual(allocateProportionally(1, [6, 2]), [1, 0]);
+  // сумма всегда равна исходному остатку
+  const split = allocateProportionally(7, [1, 1, 1]);
+  assert.equal(split.reduce((sum, value) => sum + value, 0), 7);
+  // получатели без продаж не получают ничего
+  assert.deepEqual(allocateProportionally(4, [0, 0]), [0, 0]);
+});
+
+test("redistribution moves dead stock to the stores that sell it", async () => {
+  const tempDir = path.join(process.cwd(), "test", ".tmp-redis");
+  const header = ["Місце зберігання", "", "Начало", "Расход",
+    "Отчет о розничных продажах", "Продажа покупателю", "Конец"];
+
+  fs.rmSync(tempDir, { recursive: true, force: true });
+
+  const t1 = path.join(tempDir, "t1.xlsx");
+  const t5 = path.join(tempDir, "t5.xlsx");
+  const t7 = path.join(tempDir, "t7.xlsx");
+
+  // Т1 продаёт A (6 шт), Б лежит мёртвым. Т5 мёртв по обоим. Т7 продаёт A (2 шт).
+  await writeSalesReportWorkbook(t1, "Т1", header, [
+    ["SKU-A", "Товар А", 8, 6, 6, 0, 2],
+    ["SKU-B", "Товар Б", 4, 0, 0, 0, 4]
+  ]);
+  await writeSalesReportWorkbook(t5, "Т5", header, [
+    ["SKU-A", "Товар А", 5, 0, 0, 0, 5],
+    ["SKU-B", "Товар Б", 3, 0, 0, 0, 3]
+  ]);
+  await writeSalesReportWorkbook(t7, "Т7", header, [
+    ["SKU-A", "Товар А", 3, 2, 2, 0, 1]
+  ]);
+
+  const agent = new Agent();
+  const answer = await agent.process(
+    `/excel перемещение по нулевым продажам ${t1} ${t5} ${t7}`
+  );
+  const fileMatch = answer.match(/^Excel-файл:\s*(.+\.xlsx)\s*$/m);
+
+  assert.match(answer, /Перемещение по нулевым продажам готово/);
+  // 5 штук из Т5 делятся 6:2 между Т1 и Т7 -> 4 и 1
+  assert.match(answer, /Строк перемещения: 2, единиц: 5/);
+  // SKU-B не продаётся нигде -> пропущен
+  assert.match(answer, /Пропущено \(не продаётся нигде\): 1/);
+  assert.ok(fileMatch);
+
+  const workbook = await new ExcelJS.Workbook().xlsx.readFile(fileMatch[1]);
+  const worksheet = workbook.getWorksheet("Перемещение");
+  const rows = [];
+  worksheet.eachRow((row, index) => {
+    if (index > 1) rows.push(row.values.slice(1, 8));
+  });
+
+  // [Со склада, На склад, Артикул, Название, Кол-во, Остаток источника, Продажи получателя]
+  assert.deepEqual(rows[0], ["Т5", "Т1", "SKU-A", "Товар А", 4, 5, 6]);
+  assert.deepEqual(rows[1], ["Т5", "Т7", "SKU-A", "Товар А", 1, 5, 2]);
+
+  fs.rmSync(fileMatch[1], { force: true });
+  fs.rmSync(tempDir, { recursive: true, force: true });
 });

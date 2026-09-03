@@ -2,13 +2,16 @@ import path from "node:path";
 
 import {
   discoverSpreadsheetFiles,
+  existsInProject,
   extractNamedSpreadsheetPaths,
   extractSpreadsheetPaths,
   loadWorkbooks,
-  normalizeHeader
+  normalizeHeader,
+  sortByRecency
 } from "./reader.js";
 import {
   COLUMN_ALIASES,
+  findColumn,
   flattenWorkbookRows,
   getCell,
   getProductKeys,
@@ -74,6 +77,7 @@ const PRICE_FILE_KEYWORDS = [
 /**
  * @typedef {Object} PurchaseOrderResult
  * @property {"success"|"needs_files"|"empty"} status
+ * @property {"no_files"|"not_stock_file"|null} [reason] машиночитаемая причина отказа
  * @property {PurchaseOrderLine[]} lines
  * @property {string[]} stockFiles
  * @property {string[]} priceFiles
@@ -184,11 +188,17 @@ function collectFiles(query, memories) {
     ...extractNamedSpreadsheetPaths(query, PRICE_LABELS),
     ...extractNamedSpreadsheetPaths(memoryText, PRICE_LABELS)
   ]);
-  const allFiles = unique([
-    ...extractSpreadsheetPaths(query),
-    ...extractSpreadsheetPaths(memoryText),
-    ...discoverSpreadsheetFiles()
-  ]);
+  // Явный путь в запросе — прямое указание пользователя, он идёт первым.
+  // Остальное (память + автопоиск) сортируем по свежести: спрашивают всегда
+  // про только что присланный файл, а не про первый по алфавиту.
+  const queryFiles = unique(extractSpreadsheetPaths(query)).filter(existsInProject);
+  const discoveredFiles = sortByRecency(
+    unique([
+      ...extractSpreadsheetPaths(memoryText),
+      ...discoverSpreadsheetFiles()
+    ]).filter(existsInProject)
+  );
+  const allFiles = unique([...queryFiles, ...discoveredFiles]);
   const alreadyNamed = new Set([...stockFiles, ...priceFiles]);
   const unnamedFiles = allFiles.filter(file =>
     !alreadyNamed.has(file) &&
@@ -415,6 +425,7 @@ export async function preparePurchaseOrder(input) {
   if (stockFiles.length === 0) {
     return {
       status: "needs_files",
+      reason: "no_files",
       lines: [],
       stockFiles: [],
       priceFiles,
@@ -434,6 +445,30 @@ export async function preparePurchaseOrder(input) {
 
   const defaultMinStock = getDefaultMinStock(query, memories);
   const stockWorkbooks = loadWorkbooks(stockFiles);
+
+  // Ни в одном листе нет колонки с остатком/количеством — это не файл остатков
+  // (например прислали список перемещения). Честно скажем, а не «заказ не нужен».
+  const hasStockColumn = stockWorkbooks.some(workbook =>
+    workbook.sheets.some(sheet => findColumn(sheet.headers, COLUMN_ALIASES.stock))
+  );
+
+  if (!hasStockColumn) {
+    return {
+      status: "needs_files",
+      reason: "not_stock_file",
+      lines: [],
+      stockFiles,
+      priceFiles,
+      outputPath: null,
+      summary: { lines: 0, missingPrice: 0, estimatedTotal: 0 },
+      notes: [
+        "Это не похоже на файл остатков: нет колонки с количеством/остатком.",
+        "Для заказа поставщику нужен отчёт Т1 (Начало/Расход/Конец) или остатки с колонкой «Остаток».",
+        `Проверил: ${stockFiles.join(", ")}`
+      ]
+    };
+  }
+
   const priceWorkbooks = priceFiles.length > 0
     ? loadWorkbooks(priceFiles)
     : [];

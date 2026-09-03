@@ -6,6 +6,7 @@ import xlsx from "xlsx";
 const PROJECT_ROOT = path.resolve(process.cwd());
 const DEFAULT_DATA_DIR = "data";
 const MAX_ROWS_PER_SHEET = 10000;
+const MAX_SCANNED_FILES = 500;
 const SPREADSHEET_EXTENSION_PATTERN = "(?:xlsx|xls|csv)(?:\\.(?:xlsx|xls|csv))*";
 const PATH_START_PATTERN = "(?:[A-Za-z]:[\\\\/]|\\.{1,2}[\\\\/]|[\\p{L}\\p{N}_-]+[\\\\/])";
 
@@ -96,6 +97,21 @@ export function toProjectPath(fullPath) {
     .relative(PROJECT_ROOT, fullPath)
     .split(path.sep)
     .join("/");
+}
+
+/**
+ * Существует ли файл внутри проекта. Кандидаты из запроса/памяти бывают
+ * устаревшими или испорченными (спецсимвол в имени → ложный путь), поэтому
+ * такие отсеиваем ДО загрузки, а не ловим исключение «Файл не найден».
+ * @param {string} filePath
+ * @returns {boolean}
+ */
+export function existsInProject(filePath) {
+  try {
+    return fs.existsSync(resolveProjectPath(filePath));
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -202,6 +218,10 @@ export function loadWorkbook(filePath, options = {}) {
 }
 
 /**
+ * Список путей приходит вперемешку (запрос + память + автопоиск). Устаревший
+ * или испорченный путь из памяти не должен ронять всю операцию: несуществующие
+ * отбрасываем и грузим остальные. Ошибку кидаем, только если валидных нет вовсе,
+ * и НЕ подставляем в неё битый путь — иначе пользователь видит мусор из памяти.
  * @param {string[]} filePaths
  * @param {{ maxRowsPerSheet?: number }} [options]
  * @returns {ExcelWorkbook[]}
@@ -209,8 +229,15 @@ export function loadWorkbook(filePath, options = {}) {
 export function loadWorkbooks(filePaths, options = {}) {
   const uniquePaths = [...new Set(filePaths.map(item => String(item).trim()))]
     .filter(Boolean);
+  const existing = uniquePaths.filter(existsInProject);
 
-  return uniquePaths.map(filePath => loadWorkbook(filePath, options));
+  if (existing.length === 0 && uniquePaths.length > 0) {
+    throw new Error(
+      "Не нашёл ни одного из указанных файлов. Отправь отчёт боту заново или укажи путь явно."
+    );
+  }
+
+  return existing.map(filePath => loadWorkbook(filePath, options));
 }
 
 /**
@@ -331,12 +358,92 @@ export function extractNamedSpreadsheetPaths(text, labels) {
 }
 
 /**
+ * @typedef {Object} SheetMatrix
+ * @property {string} name имя вкладки
+ * @property {unknown[][]} rows строки как массивы ячеек (header: 1)
+ */
+
+/**
+ * Читает ВСЕ вкладки книги как матрицы строк. Модули разбора отчётов раньше
+ * брали SheetNames[0] напрямую и молча теряли остальные вкладки; теперь точка
+ * входа одна. raw:true оставляет числа числами (нужно отчёту движения),
+ * raw:false отдаёт форматированные строки.
+ * @param {string} filePath
+ * @param {{ raw?: boolean }} [options]
+ * @returns {SheetMatrix[]}
+ */
+export function readSheetMatrices(filePath, options = {}) {
+  const workbook = xlsx.readFile(resolveProjectPath(filePath), {
+    cellDates: true
+  });
+
+  return workbook.SheetNames.map(name => ({
+    name,
+    rows: xlsx.utils.sheet_to_json(workbook.Sheets[name], {
+      header: 1,
+      defval: "",
+      raw: options.raw === true,
+      blankrows: false
+    })
+  }));
+}
+
+/**
+ * Имя вкладки как название точки/склада — но только если вкладок больше одной.
+ * В книге из одного листа имя служебное ("TDSheet" из 1С, "Лист1"), точку там
+ * даёт имя файла. Никто не называет двенадцать вкладок "TDSheet", поэтому
+ * количество вкладок и есть признак осмысленности имени.
+ * @param {string} sheetName
+ * @param {number} sheetCount
+ * @returns {string|null} null — брать точку из имени файла
+ */
+export function sheetPointName(sheetName, sheetCount) {
+  if (sheetCount < 2) {
+    return null;
+  }
+
+  return String(sheetName || "")
+    .replace(/^наs+/i, "")
+    .trim() || null;
+}
+
+/**
+ * @param {string} filePath
+ * @returns {number} время изменения в мс, 0 если файл недоступен
+ */
+function fileModifiedAt(filePath) {
+  try {
+    return fs.statSync(resolveProjectPath(filePath)).mtimeMs;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Свежий файл важнее старого: пользователь спрашивает про то, что только что
+ * прислал боту, а обход каталога отдаёт файлы в алфавитном порядке. Сортируем
+ * по времени изменения, недоступные файлы уходят в конец.
+ * @param {string[]} filePaths
+ * @returns {string[]}
+ */
+export function sortByRecency(filePaths) {
+  return filePaths
+    .map(filePath => ({
+      filePath,
+      modifiedAt: fileModifiedAt(filePath)
+    }))
+    .sort((left, right) => right.modifiedAt - left.modifiedAt)
+    .map(item => item.filePath);
+}
+
+/**
  * @param {string} [dir]
  * @param {{ maxFiles?: number }} [options]
  * @returns {string[]}
  */
 export function discoverSpreadsheetFiles(dir = DEFAULT_DATA_DIR, options = {}) {
   const maxFiles = options.maxFiles || 30;
+  const scanLimit = Math.max(maxFiles, MAX_SCANNED_FILES);
   const startDir = resolveProjectPath(dir);
 
   if (!fs.existsSync(startDir)) {
@@ -351,7 +458,7 @@ export function discoverSpreadsheetFiles(dir = DEFAULT_DATA_DIR, options = {}) {
    * @returns {void}
    */
   function walk(currentDir) {
-    if (found.length >= maxFiles) {
+    if (found.length >= scanLimit) {
       return;
     }
 
@@ -360,7 +467,7 @@ export function discoverSpreadsheetFiles(dir = DEFAULT_DATA_DIR, options = {}) {
     });
 
     for (const entry of entries) {
-      if (found.length >= maxFiles) {
+      if (found.length >= scanLimit) {
         return;
       }
 
@@ -379,5 +486,5 @@ export function discoverSpreadsheetFiles(dir = DEFAULT_DATA_DIR, options = {}) {
 
   walk(startDir);
 
-  return found;
+  return sortByRecency(found).slice(0, maxFiles);
 }
