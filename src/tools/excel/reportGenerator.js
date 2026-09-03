@@ -33,7 +33,7 @@ export function loadSupplySettings() {
 
 /**
  * Генерация отчета по закупкам в формат XLSX
- * @param {Array} productsData - массив товаров с продажами и остатками
+ * @param {Array<any>} productsData - массив товаров с продажами и остатками
  * @param {string} outputPath - путь, куда сохранить готовый файл
  * @param {{ periodDays?: number }} [options] - длина периода отчёта в днях
  */

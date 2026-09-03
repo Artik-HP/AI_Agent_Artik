@@ -13,6 +13,9 @@ import {
 } from "./reader.js";
 
 const OUTPUT_DIR = "exports";
+// Единая заглушка для обеих колонок склада: лист «не знаю» у пользователя
+// значит ровно это, и нечитаемый "?" рядом с ним смотрелся чужеродно.
+const UNKNOWN_LOCATION = "не знаю";
 
 /**
  * @typedef {Object} TransferLine
@@ -66,6 +69,39 @@ function looksLikeSku(value) {
 }
 
 /**
+ * Т и Х пользователь пишет кириллицей, а в именах файлов они часто латиницей
+ * («t11.xlsx»). Приводим к тому виду, в котором названы листы-получатели.
+ * @param {string} letter
+ * @param {string} digits
+ * @returns {string}
+ */
+function normalizeStoreCode(letter, digits) {
+  const map = { T: "Т", X: "Х" };
+  const upper = String(letter).toUpperCase();
+
+  return (map[upper] || upper) + digits;
+}
+
+/**
+ * Ищет код склада в имени файла: «t11», «Т5 перемещение», «переміщення Х2».
+ * Префикс времени загрузки из Telegram («1788459346140-») не мешает: он весь из
+ * цифр, а коду нужна буква вплотную перед числом. Длинные числа (даты,
+ * таймстемпы) отсекаются — у складов номера в одну-три цифры.
+ * @param {string} base имя файла без расширения
+ * @returns {string|null}
+ */
+function findStoreCode(base) {
+  const match = String(base)
+    .replace(/^\d{6,}-/, "")
+    .match(/(?<![\p{L}\d])(\p{L})\s*(\d{1,3})(?!\d)/u);
+
+  return match ? normalizeStoreCode(match[1], match[2]) : null;
+}
+
+/**
+ * Склад-источник. Внутри книги его нет вообще — ни шапки, ни свойств, имена
+ * листов заняты получателями. Поэтому источников ровно два: текст запроса и имя
+ * файла, в таком порядке доверия.
  * Из «переміщення з Т11.xlsx» достаёт «Т11». Можно переопределить в запросе:
  * «со склада=Т5» / «з Т5».
  * @param {string} query
@@ -86,7 +122,13 @@ function resolveSource(query, fileName) {
     /(?:перем[іи]щенн?[яе]|перенос|transfer)\s+(?:з|с|из|від|from)\s+(.+)$/i
   );
 
-  return fromName ? fromName[1].trim() : "?";
+  if (fromName) {
+    return fromName[1].trim();
+  }
+
+  // Имя вида «переміщення з Т11» — не единственное: файл могли переименовать в
+  // «t11.xlsx» или «Т5 перемещение.xlsx». Раньше всё это молча давало "?".
+  return findStoreCode(base) || UNKNOWN_LOCATION;
 }
 
 /**
@@ -98,7 +140,7 @@ function destinationFromSheet(sheetName) {
   return String(sheetName || "")
     .trim()
     .replace(/^на\s+/i, "")
-    .trim() || "?";
+    .trim() || UNKNOWN_LOCATION;
 }
 
 /**
@@ -346,7 +388,7 @@ export async function buildTransferDoc(input) {
   if (files.length === 0) {
     return {
       status: "needs_file",
-      from: "?",
+      from: UNKNOWN_LOCATION,
       files: [],
       lines: [],
       outputPath: null,
@@ -360,7 +402,7 @@ export async function buildTransferDoc(input) {
   /** @type {TransferLine[]} */
   const lines = [];
   const sheets = new Set();
-  let from = "?";
+  let from = UNKNOWN_LOCATION;
 
   for (const file of files) {
     const fileName = toProjectPath(resolveProjectPath(file)).split("/").pop() || file;
