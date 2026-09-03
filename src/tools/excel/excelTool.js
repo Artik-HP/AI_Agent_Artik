@@ -46,7 +46,7 @@ const HELP_TEXT = [
   "/excel замовлення data/t1.xlsx",
   "/excel непроданное data/t1.xlsx data/t2.xlsx data/x1.xlsx",
   "/excel перемещение по нулевым продажам data/t1.xlsx data/t2.xlsx",
-  "/excel перенеси с Т5 где реализация<20%",
+  "/excel перенеси где реализация<20%",
   "/excel оставь только pjur data/t1.xlsx",
   "/excel аналитика data/ostatki.xlsx data/price.xlsx",
   "/excel поиск товар data/ostatki.xlsx",
