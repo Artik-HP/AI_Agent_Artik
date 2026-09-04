@@ -1,5 +1,4 @@
 import {
-  discoverSpreadsheetFiles,
   existsInProject,
   extractSpreadsheetPaths,
   loadWorkbooks
@@ -37,6 +36,7 @@ import {
 } from "./transferByCriteria.js";
 import { searchRows } from "./search.js";
 import { runEdit } from "./editor.js";
+import { discoverChatFiles } from "./shared.js";
 
 const HELP_TEXT = [
   "Excel-модуль готов.",
@@ -57,14 +57,17 @@ const HELP_TEXT = [
 ].join("\n");
 
 /**
+ * Свой разбор входа: маршрутизатору нужны только запрос, память и чат —
+ * files/outDir разбирает уже конкретный модуль-отчёт.
  * @param {unknown} input
- * @returns {{ query: string, memories: string[] }}
+ * @returns {{ query: string, memories: string[], chatId: string|null }}
  */
 function normalizeInput(input) {
   if (typeof input === "string") {
     return {
       query: input,
-      memories: []
+      memories: [],
+      chatId: null
     };
   }
 
@@ -72,18 +75,21 @@ function normalizeInput(input) {
     const record = /** @type {Record<string, unknown>} */ (input);
     const rawQuery = record["query"];
     const rawMemories = record["memories"];
+    const rawChatId = record["chatId"];
 
     return {
       query: typeof rawQuery === "string" ? rawQuery : String(rawQuery ?? ""),
       memories: Array.isArray(rawMemories)
         ? rawMemories.filter((value) => typeof value === "string")
-        : []
+        : [],
+      chatId: rawChatId ? String(rawChatId) : null
     };
   }
 
   return {
     query: "",
-    memories: []
+    memories: [],
+    chatId: null
   };
 }
 
@@ -101,9 +107,10 @@ function removeExcelCommand(query) {
 /**
  * @param {string} query
  * @param {string[]} memories
+ * @param {string|null} [chatId]
  * @returns {string[]}
  */
-function collectFilesForReadOnlyMode(query, memories) {
+function collectFilesForReadOnlyMode(query, memories, chatId = null) {
   const files = [
     ...new Set([
       ...extractSpreadsheetPaths(query),
@@ -111,7 +118,7 @@ function collectFilesForReadOnlyMode(query, memories) {
     ])
   ].filter(existsInProject);
 
-  return files.length > 0 ? files : discoverSpreadsheetFiles();
+  return files.length > 0 ? files : discoverChatFiles(chatId);
 }
 
 /**
@@ -170,7 +177,7 @@ function shouldPrepareSalesOrder(lower) {
 }
 
 /**
- * «Перенос по критериям»: «перенеси с Т5 где реализация<20%». Отличается от
+ * «Перенос по критериям»: «перенеси где реализация<20%». Отличается от
  * shouldRedistribute наличием явного условия со сравнением, поэтому проверяется
  * раньше. Знак «=» намеренно не считается условием: «замовлення реализация=40»
  * — это переопределение порога заказа, а не перенос.
@@ -287,14 +294,16 @@ export async function runExcelTool(input) {
   if (shouldEditExcel(lower)) {
     return await runEdit({
       query,
-      memories: request.memories
+      memories: request.memories,
+      chatId: request.chatId
     });
   }
 
   if (shouldMoveByCriteria(lower)) {
     const result = await buildCriteriaTransfer({
       query,
-      memories: request.memories
+      memories: request.memories,
+      chatId: request.chatId
     });
 
     return formatCriteriaTransferResult(result);
@@ -303,7 +312,8 @@ export async function runExcelTool(input) {
   if (shouldRedistribute(lower)) {
     const result = await buildRedistribution({
       query,
-      memories: request.memories
+      memories: request.memories,
+      chatId: request.chatId
     });
 
     return formatRedistributeResult(result);
@@ -312,7 +322,8 @@ export async function runExcelTool(input) {
   if (shouldBuildTransfer(lower)) {
     const result = await buildTransferDoc({
       query,
-      memories: request.memories
+      memories: request.memories,
+      chatId: request.chatId
     });
 
     return formatTransferResult(result);
@@ -321,7 +332,8 @@ export async function runExcelTool(input) {
   if (shouldFilterByName(lower)) {
     const result = await filterRowsByName({
       query,
-      memories: request.memories
+      memories: request.memories,
+      chatId: request.chatId
     });
 
     return formatFilterResult(result);
@@ -330,7 +342,8 @@ export async function runExcelTool(input) {
   if (shouldReportDeadStock(lower)) {
     const result = await analyzeDeadStock({
       query,
-      memories: request.memories
+      memories: request.memories,
+      chatId: request.chatId
     });
 
     return formatDeadStockResult(result);
@@ -339,7 +352,8 @@ export async function runExcelTool(input) {
   if (shouldPrepareSalesOrder(lower)) {
     const result = await prepareSalesOrder({
       query,
-      memories: request.memories
+      memories: request.memories,
+      chatId: request.chatId
     });
 
     return formatSalesOrderResult(result);
@@ -351,7 +365,11 @@ export async function runExcelTool(input) {
     lower.includes("отчёт") ||
     lower.includes("summary")
   ) {
-    const files = collectFilesForReadOnlyMode(query, request.memories);
+    const files = collectFilesForReadOnlyMode(
+      query,
+      request.memories,
+      request.chatId
+    );
 
     if (files.length === 0) {
       return "Не нашёл Excel/CSV-файлы для аналитики. Укажи путь к файлу или положи таблицы в data/.";
@@ -366,7 +384,11 @@ export async function runExcelTool(input) {
     lower.startsWith("найти") ||
     lower.startsWith("search")
   ) {
-    const files = collectFilesForReadOnlyMode(query, request.memories);
+    const files = collectFilesForReadOnlyMode(
+      query,
+      request.memories,
+      request.chatId
+    );
     const searchQuery = extractSearchQuery(query);
 
     if (!searchQuery) {
@@ -386,12 +408,14 @@ export async function runExcelTool(input) {
     !hasExplicitPurchaseOrderFiles(query, request.memories) &&
     hasSalesOrderReport({
       query,
-      memories: request.memories
+      memories: request.memories,
+      chatId: request.chatId
     })
   ) {
     const result = await prepareSalesOrder({
       query,
-      memories: request.memories
+      memories: request.memories,
+      chatId: request.chatId
     });
 
     return formatSalesOrderResult(result);
@@ -399,7 +423,8 @@ export async function runExcelTool(input) {
 
   const result = await preparePurchaseOrder({
     query,
-    memories: request.memories
+    memories: request.memories,
+    chatId: request.chatId
   });
 
   // Под "заказ поставщику" подсунули список перемещения: колонки остатка в нём
@@ -411,6 +436,7 @@ export async function runExcelTool(input) {
       const transfer = await buildTransferDoc({
         query,
         memories: request.memories,
+        chatId: request.chatId,
         files: transferFiles
       });
 

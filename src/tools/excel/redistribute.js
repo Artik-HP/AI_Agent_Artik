@@ -1,16 +1,10 @@
-import fs from "node:fs";
-import path from "node:path";
-
-import ExcelJS from "exceljs";
-
 import {
-  discoverSpreadsheetFiles,
-  existsInProject,
-  extractSpreadsheetPaths
-} from "./reader.js";
+  createTimestamp,
+  normalizeInput,
+  resolveFiles
+} from "./shared.js";
+import { writeReportWorkbook } from "./writer.js";
 import { normalizeSkuKey, readReportFile } from "./deadStock.js";
-
-const OUTPUT_DIR = "exports";
 
 /**
  * @typedef {Object} PointStock
@@ -45,18 +39,6 @@ const OUTPUT_DIR = "exports";
  */
 
 /**
- * @param {Date} [date]
- * @returns {string}
- */
-function createTimestamp(date = new Date()) {
-  return date
-    .toISOString()
-    .replace(/[-:]/g, "")
-    .replace(/\..+$/, "")
-    .replace("T", "-");
-}
-
-/**
  * Делит `total` целых единиц между получателями пропорционально весам.
  * Метод наибольших остатков: сумма результата всегда ровно `total`, поэтому
  * со склада уезжает ни больше ни меньше, чем там лежит.
@@ -87,48 +69,6 @@ export function allocateProportionally(total, weights) {
   }
 
   return result;
-}
-
-/**
- * @param {unknown} input
- * @returns {{ query: string, memories: string[], files: string[], outDir: string|null }}
- */
-function normalizeInput(input) {
-  if (typeof input === "string") {
-    return { query: input, memories: [], files: [], outDir: null };
-  }
-
-  if (input && typeof input === "object") {
-    const record = /** @type {Record<string, unknown>} */ (input);
-
-    return {
-      query: String(record.query || ""),
-      memories: Array.isArray(record.memories) ? record.memories.map(String) : [],
-      files: Array.isArray(record.files) ? record.files.map(String) : [],
-      outDir: record.outDir ? String(record.outDir) : null
-    };
-  }
-
-  return { query: "", memories: [], files: [], outDir: null };
-}
-
-/**
- * @param {{ query: string, memories: string[], files: string[] }} request
- * @returns {string[]}
- */
-function resolveFiles(request) {
-  if (request.files.length > 0) {
-    return [...new Set(request.files)].filter(existsInProject);
-  }
-
-  const named = [
-    ...new Set([
-      ...extractSpreadsheetPaths(request.query),
-      ...extractSpreadsheetPaths(request.memories.join("\n"))
-    ])
-  ].filter(existsInProject);
-
-  return named.length > 0 ? named : discoverSpreadsheetFiles();
 }
 
 /**
@@ -188,29 +128,21 @@ function groupBySkuAndPoint(records) {
  * @returns {Promise<string>}
  */
 async function writeRedistributeWorkbook(result, outDir) {
-  const dir = outDir ? path.resolve(outDir) : path.resolve(process.cwd(), OUTPUT_DIR);
-  fs.mkdirSync(dir, { recursive: true });
-
-  const filePath = path.join(dir, `peremeshchenie-po-prodazham-${createTimestamp()}.xlsx`);
-  const workbook = new ExcelJS.Workbook();
-
-  workbook.creator = "AI_Agent_Artik";
-  workbook.created = new Date();
-
-  const worksheet = workbook.addWorksheet("Перемещение");
-  worksheet.columns = [
-    { header: "Со склада", key: "from", width: 26 },
-    { header: "На склад", key: "to", width: 26 },
-    { header: "Артикул", key: "sku", width: 18 },
-    { header: "Название", key: "name", width: 52 },
-    { header: "Кол-во", key: "qty", width: 9 },
-    { header: "Остаток источника", key: "sourceStock", width: 17 },
-    { header: "Продажи получателя", key: "destSales", width: 18 },
-    { header: "Доля получателя", key: "share", width: 15 }
-  ];
-
-  for (const line of result.lines) {
-    worksheet.addRow({
+  return await writeReportWorkbook({
+    fileName: `peremeshchenie-po-prodazham-${createTimestamp()}`,
+    sheetName: "Перемещение",
+    outDir,
+    columns: [
+      { header: "Со склада", key: "from", width: 26 },
+      { header: "На склад", key: "to", width: 26 },
+      { header: "Артикул", key: "sku", width: 18 },
+      { header: "Название", key: "name", width: 52 },
+      { header: "Кол-во", key: "qty", width: 9 },
+      { header: "Остаток источника", key: "sourceStock", width: 17 },
+      { header: "Продажи получателя", key: "destSales", width: 18 },
+      { header: "Доля получателя", key: "share", width: 15, numFmt: "0%" }
+    ],
+    rows: result.lines.map(line => ({
       from: line.from,
       to: line.to,
       sku: line.sku,
@@ -219,17 +151,8 @@ async function writeRedistributeWorkbook(result, outDir) {
       sourceStock: line.sourceStock,
       destSales: line.destSales,
       share: line.share
-    });
-  }
-
-  worksheet.getColumn("share").numFmt = "0%";
-  worksheet.getRow(1).font = { bold: true };
-  worksheet.views = [{ state: "frozen", ySplit: 1 }];
-  worksheet.autoFilter = { from: "A1", to: "H1" };
-
-  await workbook.xlsx.writeFile(filePath);
-
-  return filePath;
+    }))
+  });
 }
 
 /**

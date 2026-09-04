@@ -1,18 +1,16 @@
-import fs from "node:fs";
-import path from "node:path";
-
-import ExcelJS from "exceljs";
 import xlsx from "xlsx";
 
 import {
-  discoverSpreadsheetFiles,
-  existsInProject,
-  extractSpreadsheetPaths,
+  createTimestamp,
+  normalizeInput,
+  resolveFiles
+} from "./shared.js";
+import { writeReportWorkbook } from "./writer.js";
+import {
   resolveProjectPath,
   toProjectPath
 } from "./reader.js";
 
-const OUTPUT_DIR = "exports";
 // Единая заглушка для обеих колонок склада: лист «не знаю» у пользователя
 // значит ровно это, и нечитаемый "?" рядом с ним смотрелся чужеродно.
 const UNKNOWN_LOCATION = "не знаю";
@@ -37,18 +35,6 @@ const UNKNOWN_LOCATION = "не знаю";
  * @property {{ sheets: number, lines: number, byDestination: Record<string, number> }} stats
  * @property {string[]} notes
  */
-
-/**
- * @param {Date} [date]
- * @returns {string}
- */
-function createTimestamp(date = new Date()) {
-  return date
-    .toISOString()
-    .replace(/[-:]/g, "")
-    .replace(/\..+$/, "")
-    .replace("T", "-");
-}
 
 /**
  * Похоже ли значение на артикул: нет пробелов, есть хотя бы одна цифра,
@@ -291,90 +277,32 @@ export function looksLikeTransferFile(filePath) {
 }
 
 /**
- * @param {unknown} input
- * @returns {{ query: string, memories: string[], files: string[], outDir: string|null }}
- */
-function normalizeInput(input) {
-  if (typeof input === "string") {
-    return { query: input, memories: [], files: [], outDir: null };
-  }
-
-  if (input && typeof input === "object") {
-    const record = /** @type {Record<string, unknown>} */ (input);
-
-    return {
-      query: String(record.query || ""),
-      memories: Array.isArray(record.memories) ? record.memories.map(String) : [],
-      files: Array.isArray(record.files) ? record.files.map(String) : [],
-      outDir: record.outDir ? String(record.outDir) : null
-    };
-  }
-
-  return { query: "", memories: [], files: [], outDir: null };
-}
-
-/**
- * @param {{ query: string, memories: string[], files: string[] }} request
- * @returns {string[]}
- */
-function resolveFiles(request) {
-  if (request.files.length > 0) {
-    return [...new Set(request.files)].filter(existsInProject);
-  }
-
-  const named = [
-    ...new Set([
-      ...extractSpreadsheetPaths(request.query),
-      ...extractSpreadsheetPaths(request.memories.join("\n"))
-    ])
-  ].filter(existsInProject);
-
-  return named.length > 0 ? named : discoverSpreadsheetFiles();
-}
-
-/**
  * @param {TransferResult} result
  * @param {string|null} outDir
  * @returns {Promise<string>}
  */
 async function writeTransferWorkbook(result, outDir) {
-  const dir = outDir ? path.resolve(outDir) : path.resolve(process.cwd(), OUTPUT_DIR);
-  fs.mkdirSync(dir, { recursive: true });
-
-  const filePath = path.join(dir, `peremeshchenie-${createTimestamp()}.xlsx`);
-  const workbook = new ExcelJS.Workbook();
-
-  workbook.creator = "AI_Agent_Artik";
-  workbook.created = new Date();
-
-  const worksheet = workbook.addWorksheet("Перемещение");
-  worksheet.columns = [
-    { header: "Со склада", key: "from", width: 12 },
-    { header: "На склад", key: "to", width: 14 },
-    { header: "Артикул", key: "sku", width: 20 },
-    { header: "Название", key: "name", width: 44 },
-    { header: "Кол-во", key: "qty", width: 10 },
-    { header: "Примечание", key: "note", width: 32 }
-  ];
-
-  for (const line of result.lines) {
-    worksheet.addRow({
+  return await writeReportWorkbook({
+    fileName: `peremeshchenie-${createTimestamp()}`,
+    sheetName: "Перемещение",
+    outDir,
+    columns: [
+      { header: "Со склада", key: "from", width: 12 },
+      { header: "На склад", key: "to", width: 14 },
+      { header: "Артикул", key: "sku", width: 20 },
+      { header: "Название", key: "name", width: 44 },
+      { header: "Кол-во", key: "qty", width: 10 },
+      { header: "Примечание", key: "note", width: 32 }
+    ],
+    rows: result.lines.map(line => ({
       from: line.from,
       to: line.to,
       sku: line.sku,
       name: "",
       qty: "",
       note: line.note
-    });
-  }
-
-  worksheet.getRow(1).font = { bold: true };
-  worksheet.views = [{ state: "frozen", ySplit: 1 }];
-  worksheet.autoFilter = { from: "A1", to: "F1" };
-
-  await workbook.xlsx.writeFile(filePath);
-
-  return filePath;
+    }))
+  });
 }
 
 /**

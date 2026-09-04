@@ -97,6 +97,39 @@ const BUTTON_COMMANDS = new Map([
 ]);
 
 /**
+ * Меню команд Telegram — выпадающий список по кнопке «/» в поле ввода.
+ * Ограничения Bot API: имя без слэша, только a-z, 0-9 и «_», до 32 символов;
+ * описание до 256 символов; не больше 100 команд. Аргументы команд
+ * («/agent default», «/context clear») Telegram в меню не показывает,
+ * поэтому здесь только базовые имена.
+ * @type {{ command: string, description: string }[]}
+ */
+const BOT_COMMANDS = [
+  { command: "start", description: "Запустить бота" },
+  { command: "help", description: "Список всех команд" },
+  { command: "commands", description: "Список всех команд" },
+  { command: "tools", description: "Список инструментов" },
+  { command: "agents", description: "Список агентов" },
+  { command: "agent", description: "Текущий режим агента или смена: /agent coder" },
+  { command: "coder", description: "JavaScript-наставник" },
+  { command: "architect", description: "Архитектор AI-агентов" },
+  { command: "excel", description: "Excel/CSV: поиск, аналитика, заказ поставщику" },
+  { command: "draw", description: "Нарисовать картинку по описанию" },
+  { command: "search", description: "Поиск в интернете" },
+  { command: "news", description: "Последние новости по теме" },
+  { command: "weather", description: "Погода в городе" },
+  { command: "youtube", description: "Поиск видео на YouTube" },
+  { command: "codebase", description: "Проанализировать кодовую базу проекта" },
+  { command: "write", description: "Записать текст в файл: /write путь | текст" },
+  { command: "memory", description: "Показать долгую память" },
+  { command: "history", description: "Память с номерами записей" },
+  { command: "remember", description: "Сохранить последнее сообщение в память" },
+  { command: "forget", description: "Удалить запись из памяти по номеру или тексту" },
+  { command: "clear", description: "Очистить память" },
+  { command: "context", description: "История текущего диалога" }
+];
+
+/**
  * @param {string | number | undefined} chatId
  */
 function getAgent(chatId) {
@@ -560,6 +593,33 @@ async function handleTelegramError(ctx, error) {
   );
 }
 
+/**
+ * Регистрирует меню команд на серверах Telegram.
+ * Сбой не должен ронять бота: без меню он полностью работоспособен,
+ * команды по-прежнему можно набирать вручную. Один невалидный элемент
+ * списка отклоняет весь запрос, поэтому ошибку пишем в лог явно.
+ * @param {import("telegraf").Telegraf} bot
+ * @returns {Promise<void>}
+ */
+async function registerBotCommands(bot) {
+  try {
+    await bot.telegram.setMyCommands(BOT_COMMANDS);
+
+    console.log(
+      "Меню команд зарегистрировано:",
+      BOT_COMMANDS.length
+    );
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : String(error);
+
+    console.error(
+      "Не удалось зарегистрировать меню команд:",
+      message
+    );
+  }
+}
+
 export async function startTelegramBot() {
   const token = process.env.TELEGRAM_BOT_TOKEN;
 
@@ -591,6 +651,8 @@ export async function startTelegramBot() {
   bot.on("voice", handleSpeechMessage);
   bot.on("audio", handleSpeechMessage);
   bot.on("document", handleDocumentMessage);
+
+  await registerBotCommands(bot);
 
   console.log("TOKEN:", token ? "есть" : "нет");
   console.log("1. Создаем Telegraf");
