@@ -1,12 +1,13 @@
-import fs from "node:fs";
 import path from "node:path";
 
-import ExcelJS from "exceljs";
-
+import { NORMALIZED_MOVEMENT_LABELS } from "./columns.js";
 import {
-  discoverSpreadsheetFiles,
-  existsInProject,
-  extractSpreadsheetPaths,
+  createTimestamp,
+  normalizeInput,
+  resolveFiles
+} from "./shared.js";
+import { writeReportWorkbook } from "./writer.js";
+import {
   normalizeHeader,
   readSheetMatrices,
   resolveProjectPath,
@@ -15,46 +16,19 @@ import {
 } from "./reader.js";
 import { parseNumber } from "./search.js";
 
-const OUTPUT_DIR = "exports";
-
 /**
  * Тексты заголовков, по которым находим колонки продаж. Раскладка выгрузок
  * 1С/BAS у разных точек разная (у одних есть «Оприходование запасов», у других
  * «Возврат поставщику» и т.п.), поэтому колонку ищем по названию, не по индексу.
  */
-const RETAIL_LABELS = [
-  "отчет о розничных продажах",
-  "звіт про роздрібні продажі",
-  "розничных продаж",
-  "роздрібних продаж"
-].map(normalizeHeader);
-
-const WHOLESALE_LABELS = [
-  "продажа покупателю",
-  "продаж покупцю"
-].map(normalizeHeader);
-
-const END_LABELS = [
-  "конец",
-  "кінець"
-].map(normalizeHeader);
+const RETAIL_LABELS = NORMALIZED_MOVEMENT_LABELS.retailSales;
+const WHOLESALE_LABELS = NORMALIZED_MOVEMENT_LABELS.buyerSales;
+const END_LABELS = NORMALIZED_MOVEMENT_LABELS.end;
 
 /** Базовые колонки движения — нужны, чтобы посчитать реализацию и запас. */
-const START_LABELS = [
-  "начало",
-  "початок"
-].map(normalizeHeader);
-
-const RECEIPT_LABELS = [
-  "приход",
-  "прихід"
-].map(normalizeHeader);
-
-const EXPENSE_LABELS = [
-  "расход",
-  "розхід",
-  "витрата"
-].map(normalizeHeader);
+const START_LABELS = NORMALIZED_MOVEMENT_LABELS.start;
+const RECEIPT_LABELS = NORMALIZED_MOVEMENT_LABELS.receipt;
+const EXPENSE_LABELS = NORMALIZED_MOVEMENT_LABELS.expense;
 
 /** Первые две колонки выгрузки BAS — всегда артикул и наименование. */
 const SKU_HEADER = "Артикул";
@@ -98,18 +72,6 @@ const EXTRA_HEADERS = ["Точка", "Файл", "Розница за перио
  * @property {string|null} outputPath
  * @property {string[]} notes
  */
-
-/**
- * @param {Date} [date]
- * @returns {string}
- */
-function createTimestamp(date = new Date()) {
-  return date
-    .toISOString()
-    .replace(/[-:]/g, "")
-    .replace(/\..+$/, "")
-    .replace("T", "-");
-}
 
 /**
  * «Т12_продажи_...xlsx» → «Т12». Запасной вариант, если в файле нет строк-складов.
@@ -302,74 +264,13 @@ export function readReportFile(filePath) {
 }
 
 /**
- * @param {unknown} input
- * @returns {{ query: string, memories: string[], files: string[], outDir: string|null }}
- */
-function normalizeInput(input) {
-  if (typeof input === "string") {
-    return { query: input, memories: [], files: [], outDir: null };
-  }
-
-  if (input && typeof input === "object") {
-    const record = /** @type {Record<string, unknown>} */ (input);
-
-    return {
-      query: String(record.query || ""),
-      memories: Array.isArray(record.memories) ? record.memories.map(String) : [],
-      files: Array.isArray(record.files) ? record.files.map(String) : [],
-      outDir: record.outDir ? String(record.outDir) : null
-    };
-  }
-
-  return { query: "", memories: [], files: [], outDir: null };
-}
-
-/**
- * @param {{ query: string, memories: string[], files: string[] }} request
- * @returns {string[]}
- */
-function resolveFiles(request) {
-  if (request.files.length > 0) {
-    return [...new Set(request.files)].filter(existsInProject);
-  }
-
-  const named = [
-    ...new Set([
-      ...extractSpreadsheetPaths(request.query),
-      ...extractSpreadsheetPaths(request.memories.join("\n"))
-    ])
-  ].filter(existsInProject);
-
-  return named.length > 0 ? named : discoverSpreadsheetFiles();
-}
-
-/**
  * @param {DeadStockResult} result
  * @param {string|null} outDir
  * @returns {Promise<string>}
  */
 async function writeDeadStockWorkbook(result, outDir) {
-  const dir = outDir
-    ? path.resolve(outDir)
-    : path.resolve(process.cwd(), OUTPUT_DIR);
-  fs.mkdirSync(dir, { recursive: true });
-
-  const filePath = path.join(dir, `neprodano-${createTimestamp()}.xlsx`);
-  const workbook = new ExcelJS.Workbook();
-
-  workbook.creator = "AI_Agent_Artik";
-  workbook.created = new Date();
-
-  const worksheet = workbook.addWorksheet("Непродано");
-  const columns = [...EXTRA_HEADERS, ...result.columns];
-
-  worksheet.columns = columns.map(header => ({
-    header,
-    key: header,
-    width: header === NAME_HEADER ? 60 : header.length > 18 ? 22 : 14
-  }));
-
-  for (const { group, rec } of result.outputRecords) {
+  const headers = [...EXTRA_HEADERS, ...result.columns];
+  const rows = result.outputRecords.map(({ group, rec }) => {
     /** @type {Record<string, unknown>} */
     const row = {
       "Точка": rec.point,
@@ -387,22 +288,23 @@ async function writeDeadStockWorkbook(result, outDir) {
       }
 
       const asNumber = parseNumber(raw);
+
       row[header] = asNumber === null ? raw : asNumber;
     }
 
-    worksheet.addRow(row);
-  }
+    return row;
+  });
 
-  worksheet.getRow(1).font = { bold: true };
-  worksheet.views = [{ state: "frozen", ySplit: 1 }];
-  worksheet.autoFilter = {
-    from: { row: 1, column: 1 },
-    to: { row: 1, column: columns.length }
-  };
-
-  await workbook.xlsx.writeFile(filePath);
-
-  return filePath;
+  return await writeReportWorkbook({
+    fileName: `neprodano-${createTimestamp()}`,
+    sheetName: "Непродано",
+    outDir,
+    columns: headers.map(header => ({
+      header,
+      width: header === NAME_HEADER ? 60 : header.length > 18 ? 22 : 14
+    })),
+    rows
+  });
 }
 
 /**

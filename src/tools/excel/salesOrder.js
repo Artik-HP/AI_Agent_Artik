@@ -3,8 +3,14 @@ import path from "node:path";
 
 import ExcelJS from "exceljs";
 
+import { MOVEMENT_LABELS } from "./columns.js";
 import {
-  discoverSpreadsheetFiles,
+  createTimestamp,
+  discoverChatFiles,
+  looksLikeGeneratedReport,
+  OUTPUT_DIR
+} from "./shared.js";
+import {
   existsInProject,
   extractSpreadsheetPaths,
   normalizeHeader,
@@ -16,7 +22,6 @@ import {
 import { parseNumber } from "./search.js";
 import { loadSupplySettings } from "./reportGenerator.js";
 
-const OUTPUT_DIR = "exports";
 const DEFAULT_MAX_STOCK_DAYS = 45;
 const DEFAULT_TARGET_PERIODS = 2;
 
@@ -61,19 +66,7 @@ const FALLBACK_PERIOD_DAYS = 14;
  * Раскладка выгрузок из 1С/BAS отличается между торговыми точками, поэтому
  * позицию колонки определяем по названию, а не по индексу.
  */
-const HEADER_LABELS = {
-  start: ["начало", "початок"],
-  receipt: ["приход", "прихід"],
-  expense: ["расход", "розхід", "витрата"],
-  retailSales: [
-    "отчет о розничных продажах",
-    "звіт про роздрібні продажі",
-    "розничных продаж",
-    "роздрібних продаж"
-  ],
-  buyerSales: ["продажа покупателю", "продаж покупцю"],
-  end: ["конец", "кінець"]
-};
+const HEADER_LABELS = MOVEMENT_LABELS;
 
 const FILL_COLORS = {
   available: "FFBDD7EE",
@@ -130,18 +123,6 @@ const FILL_COLORS = {
  * @property {SalesOrderStats} [stats]
  * @property {string[]} notes
  */
-
-/**
- * @param {Date} [date]
- * @returns {string}
- */
-function createTimestamp(date = new Date()) {
-  return date
-    .toISOString()
-    .replace(/[-:]/g, "")
-    .replace(/\..+$/, "")
-    .replace("T", "-");
-}
 
 /**
  * @param {string[]} values
@@ -346,21 +327,6 @@ function resolveColumns(rows) {
  * @param {string} filePath
  * @returns {boolean}
  */
-function looksLikeOutputFile(filePath) {
-  const fileName = path.basename(filePath).toLowerCase();
-
-  return (
-    fileName.includes("замовлення") ||
-    fileName.includes("заказ") ||
-    fileName.includes("order") ||
-    fileName.includes("purchase")
-  );
-}
-
-/**
- * @param {string} filePath
- * @returns {boolean}
- */
 function isLikelyMovementReport(filePath) {
   try {
     // Достаточно одной подходящей вкладки: первая бывает титульной или сводной,
@@ -386,9 +352,10 @@ function isLikelyMovementReport(filePath) {
 /**
  * @param {string} query
  * @param {string[]} memories
+ * @param {string|null} [chatId]
  * @returns {string|null}
  */
-function findReportFile(query, memories) {
+function findReportFile(query, memories, chatId = null) {
   // Явно названный в запросе файл — приоритетнее. Дальше идут пути из памяти,
   // но в обратном порядке: последний загруженный в Telegram отчёт — первым.
   const queryFiles = extractSpreadsheetPaths(query);
@@ -396,11 +363,11 @@ function findReportFile(query, memories) {
   const files = unique([...queryFiles, ...memoryFiles]).filter(existsInProject);
 
   if (files.length > 0) {
-    return files.find(file => !looksLikeOutputFile(file)) || files[0];
+    return files.find(file => !looksLikeGeneratedReport(file)) || files[0];
   }
 
-  const discovered = discoverSpreadsheetFiles()
-    .filter(file => !looksLikeOutputFile(file));
+  const discovered = discoverChatFiles(chatId)
+    .filter(file => !looksLikeGeneratedReport(file));
 
   return discovered.find(isLikelyMovementReport) || discovered[0] || null;
 }
@@ -849,27 +816,32 @@ async function writeSalesOrderWorkbook(result) {
 }
 
 /**
+ * Свой разбор входа: замовлення Т1 работает с ОДНИМ файлом-отчётом, поэтому
+ * поля files/outDir из общего ExcelRequest ему не нужны.
  * @param {unknown} input
- * @returns {{ query: string, memories: string[] }}
+ * @returns {{ query: string, memories: string[], chatId: string|null }}
  */
 function normalizeInput(input) {
   if (typeof input === "string") {
     return {
       query: input,
-      memories: []
+      memories: [],
+      chatId: null
     };
   }
 
   if (input && typeof input === "object") {
     return {
       query: String(input.query || ""),
-      memories: Array.isArray(input.memories) ? input.memories : []
+      memories: Array.isArray(input.memories) ? input.memories : [],
+      chatId: input.chatId ? String(input.chatId) : null
     };
   }
 
   return {
     query: "",
-    memories: []
+    memories: [],
+    chatId: null
   };
 }
 
@@ -926,7 +898,11 @@ function describeEmptyReport(stats, options) {
  */
 export async function prepareSalesOrder(input) {
   const request = normalizeInput(input);
-  const sourceFile = findReportFile(request.query, request.memories);
+  const sourceFile = findReportFile(
+    request.query,
+    request.memories,
+    request.chatId
+  );
   const options = parseOptions(request.query, sourceFile || "");
 
   if (!sourceFile) {

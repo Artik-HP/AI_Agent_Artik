@@ -286,37 +286,3 @@ export function searchRows(workbooks, query, options = {}) {
 
   return matches;
 }
-
-/**
- * @param {import("./reader.js").ExcelWorkbook[]} workbooks
- * @param {string} query
- * @returns {SearchMatch[]}
- */
-export function findProduct(workbooks, query) {
-  return searchRows(workbooks, query, {
-    columns: COLUMN_ALIASES.name
-  });
-}
-
-/**
- * @param {import("./reader.js").ExcelWorkbook[]} workbooks
- * @param {string} query
- * @returns {SearchMatch[]}
- */
-export function findBrand(workbooks, query) {
-  return searchRows(workbooks, query, {
-    columns: ["brand", "бренд", "марка"]
-  });
-}
-
-export function findCategory(workbooks, query) {
-  return searchRows(workbooks, query, {
-    columns: COLUMN_ALIASES.category
-  });
-}
-
-export function findBarcode(workbooks, query) {
-  return searchRows(workbooks, query, {
-    columns: COLUMN_ALIASES.barcode
-  });
-}

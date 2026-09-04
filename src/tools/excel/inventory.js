@@ -1,7 +1,6 @@
 import path from "node:path";
 
 import {
-  discoverSpreadsheetFiles,
   existsInProject,
   extractNamedSpreadsheetPaths,
   extractSpreadsheetPaths,
@@ -18,6 +17,7 @@ import {
   normalizeLookupValue,
   parseNumber
 } from "./search.js";
+import { discoverChatFiles } from "./shared.js";
 import { writePurchaseOrderWorkbook } from "./writer.js";
 
 const DEFAULT_MIN_STOCK = 5;
@@ -176,9 +176,10 @@ function classifyFiles(files) {
 /**
  * @param {string} query
  * @param {string[]} memories
+ * @param {string|null} [chatId]
  * @returns {{ stockFiles: string[], priceFiles: string[] }}
  */
-function collectFiles(query, memories) {
+function collectFiles(query, memories, chatId = null) {
   const memoryText = memories.join("\n");
   const stockFiles = unique([
     ...extractNamedSpreadsheetPaths(query, STOCK_LABELS),
@@ -195,7 +196,7 @@ function collectFiles(query, memories) {
   const discoveredFiles = sortByRecency(
     unique([
       ...extractSpreadsheetPaths(memoryText),
-      ...discoverSpreadsheetFiles()
+      ...discoverChatFiles(chatId)
     ]).filter(existsInProject)
   );
   const allFiles = unique([...queryFiles, ...discoveredFiles]);
@@ -412,7 +413,7 @@ export async function preparePurchaseOrder(input) {
   const request = normalizeInput(input);
   const query = String(request.query || "");
   const memories = Array.isArray(request.memories) ? request.memories : [];
-  const collected = collectFiles(query, memories);
+  const collected = collectFiles(query, memories, request.chatId || null);
   const stockFiles = unique([
     ...(request.stockFiles || []),
     ...collected.stockFiles
@@ -546,12 +547,6 @@ export function formatPurchaseOrderResult(result) {
   ].join("\n");
 }
 
-export async function runPurchaseOrderTool(input) {
-  const result = await preparePurchaseOrder(input);
-
-  return formatPurchaseOrderResult(result);
-}
-
 export function lowStock(rows, defaultMinStock = DEFAULT_MIN_STOCK) {
   return rows
     .map(item => createInventoryLine(item, defaultMinStock))
@@ -564,19 +559,4 @@ export function zeroStock(rows) {
 
     return stock !== null && stock <= 0;
   });
-}
-
-export function updateQuantity(row, quantity) {
-  return {
-    ...row,
-    quantity
-  };
-}
-
-export function addProduct(rows, product) {
-  return [...rows, product];
-}
-
-export function removeProduct(rows, predicate) {
-  return rows.filter(row => !predicate(row));
 }
