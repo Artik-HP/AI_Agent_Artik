@@ -1,3 +1,5 @@
+import http from "node:http";
+
 import "dotenv/config";
 
 import { createInterface } from "node:readline";
@@ -10,6 +12,19 @@ import {
 } from "./src/database.js";
 import { installCrashHandlers, logError, logInfo } from "./src/utils/logger.js";
 
+import express from "express";
+
+const app = express();
+
+const PORT = Number.parseInt(process.env.PORT ?? "3000", 10);
+
+app.get("/", (req, res) => {
+  res.send("AI Agent Artik is alive 🚀");
+});
+
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`Server running on port ${PORT}`);
+});
 // Ставим до всего остального: падение на старте тоже должно оставить след.
 installCrashHandlers();
 
@@ -123,4 +138,18 @@ async function runCli() {
 main().catch(error => {
   logError("Ошибка запуска:", error);
   process.exitCode = 1;
+});
+
+const HTTP_PORT = Number.parseInt(process.env.PORT ?? "10000", 10);
+
+const server = http.createServer((req, res) => {
+  res.writeHead(200, {
+    "Content-Type": "text/plain; charset=utf-8",
+  });
+
+  res.end("AI Agent Artik Bot is alive 🚀");
+});
+
+server.listen(HTTP_PORT, "0.0.0.0", () => {
+  console.log(`🌐 Render HTTP server running on port ${HTTP_PORT}`);
 });
