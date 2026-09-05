@@ -3,19 +3,10 @@ import path from "node:path";
 
 import ExcelJS from "exceljs";
 
-const OUTPUT_DIR = "exports";
-
-/**
- * @param {Date} [date]
- * @returns {string}
- */
-function createTimestamp(date = new Date()) {
-  return date
-    .toISOString()
-    .replace(/[-:]/g, "")
-    .replace(/\..+$/, "")
-    .replace("T", "-");
-}
+import {
+  createTimestamp,
+  OUTPUT_DIR
+} from "./shared.js";
 
 /**
  * @param {ExcelJS.Worksheet} worksheet
@@ -197,7 +188,74 @@ export async function writePurchaseOrderWorkbook(result, options = {}) {
   return filePath;
 }
 
-export async function createReport(result, options = {}) {
-  return await writePurchaseOrderWorkbook(result, options);
-}
 
+/**
+ * @typedef {Object} ReportColumn
+ * @property {string} header текст заголовка
+ * @property {string} [key] ключ значения в строке; по умолчанию сам header
+ * @property {number} [width] ширина колонки
+ * @property {string} [numFmt] формат ячеек, например "0%"
+ */
+
+/**
+ * @typedef {Object} ReportSpec
+ * @property {string} fileName имя файла без каталога и расширения
+ * @property {string} sheetName имя листа
+ * @property {ReportColumn[]} columns
+ * @property {Record<string, unknown>[]} rows значения по ключам колонок
+ * @property {string|null} [outDir] каталог результата, пусто — OUTPUT_DIR
+ */
+
+/**
+ * Пишет плоский табличный отчёт: шапка жирным, закреплённая первая строка,
+ * автофильтр по всей ширине. Раньше эта обвязка была скопирована в пяти
+ * модулях, причём автофильтр задавался тремя разными способами (проверено:
+ * все три дают один и тот же диапазон).
+ *
+ * Замовлення Т1 сюда не переводится сознательно: у него заливки, формулы и
+ * объединённые ячейки — своя, не табличная форма.
+ * @param {ReportSpec} spec
+ * @returns {Promise<string>} путь к записанному файлу
+ */
+export async function writeReportWorkbook(spec) {
+  const dir = spec.outDir
+    ? path.resolve(spec.outDir)
+    : path.resolve(process.cwd(), OUTPUT_DIR);
+
+  fs.mkdirSync(dir, { recursive: true });
+
+  const filePath = path.join(dir, `${spec.fileName}.xlsx`);
+  const workbook = new ExcelJS.Workbook();
+
+  workbook.creator = "AI_Agent_Artik";
+  workbook.created = new Date();
+
+  const worksheet = workbook.addWorksheet(spec.sheetName);
+
+  worksheet.columns = spec.columns.map(column => ({
+    header: column.header,
+    key: column.key || column.header,
+    width: column.width
+  }));
+
+  for (const row of spec.rows) {
+    worksheet.addRow(row);
+  }
+
+  for (const column of spec.columns) {
+    if (column.numFmt) {
+      worksheet.getColumn(column.key || column.header).numFmt = column.numFmt;
+    }
+  }
+
+  worksheet.getRow(1).font = { bold: true };
+  worksheet.views = [{ state: "frozen", ySplit: 1 }];
+  worksheet.autoFilter = {
+    from: { row: 1, column: 1 },
+    to: { row: 1, column: spec.columns.length }
+  };
+
+  await workbook.xlsx.writeFile(filePath);
+
+  return filePath;
+}

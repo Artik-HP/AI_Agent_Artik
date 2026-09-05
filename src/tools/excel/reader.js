@@ -438,13 +438,17 @@ export function sortByRecency(filePaths) {
 
 /**
  * @param {string} [dir]
- * @param {{ maxFiles?: number }} [options]
+ * @param {{ maxFiles?: number, skipDirs?: string[] }} [options] skipDirs —
+ *   каталоги, в которые не заходим (например чужие загрузки в data/telegram)
  * @returns {string[]}
  */
 export function discoverSpreadsheetFiles(dir = DEFAULT_DATA_DIR, options = {}) {
   const maxFiles = options.maxFiles || 30;
   const scanLimit = Math.max(maxFiles, MAX_SCANNED_FILES);
   const startDir = resolveProjectPath(dir);
+  const skipDirs = new Set(
+    (options.skipDirs || []).map(item => toProjectPath(resolveProjectPath(item)))
+  );
 
   if (!fs.existsSync(startDir)) {
     return [];
@@ -474,6 +478,10 @@ export function discoverSpreadsheetFiles(dir = DEFAULT_DATA_DIR, options = {}) {
       const fullPath = path.join(currentDir, entry.name);
 
       if (entry.isDirectory()) {
+        if (skipDirs.has(toProjectPath(fullPath))) {
+          continue;
+        }
+
         walk(fullPath);
         continue;
       }

@@ -15,8 +15,15 @@ import {
   loadWorkbooks
 } from "../src/tools/excel/reader.js";
 import { extractKeepPhrase } from "../src/tools/excel/filterByName.js";
+import {
+  discoverChatFiles,
+  resolveFiles
+} from "../src/tools/excel/shared.js";
 import { allocateProportionally } from "../src/tools/excel/redistribute.js";
-import { parseCriteria } from "../src/tools/excel/transferByCriteria.js";
+import {
+  parseCriteria,
+  parseSourcePoint
+} from "../src/tools/excel/transferByCriteria.js";
 
 delete process.env.DATABASE_URL;
 delete process.env.DATABASE_SSL;
@@ -732,6 +739,16 @@ test("every criteria button phrase routes to the criteria transfer", () => {
   }
 });
 
+test("parseSourcePoint is optional and tolerates latin store codes", () => {
+  // Основной режим — без магазина: считаем по всем точкам.
+  assert.equal(parseSourcePoint("перенеси где реализация<20%"), null);
+  assert.equal(parseSourcePoint("перенеси с Т5 где реализация<20%"), "Т5");
+  assert.equal(parseSourcePoint("перенеси с т5 где реализация<20%"), "Т5");
+  // Латинскую раскладку приводим к кириллице — точки названы кириллицей.
+  assert.equal(parseSourcePoint("перенеси с t5 где реализация<20%"), "Т5");
+  assert.equal(parseSourcePoint("перенеси из x2 где реализация<20%"), "Х2");
+});
+
 test("parseCriteria reads thresholds and normalizes percents", () => {
   assert.deepEqual(
     parseCriteria("перенеси с Т5 реализация<20%").map(item =>
@@ -801,4 +818,63 @@ test("criteria transfer moves low sell-through stock off the named store", async
 
   fs.rmSync(fileMatch[1], { force: true });
   fs.rmSync(tempDir, { recursive: true, force: true });
+});
+
+test("file pool is scoped to the chat that uploaded the files", () => {
+  const own = path.join(process.cwd(), "data", "telegram", "test-chat-own");
+  const other = path.join(process.cwd(), "data", "telegram", "test-chat-other");
+
+  fs.mkdirSync(own, { recursive: true });
+  fs.mkdirSync(other, { recursive: true });
+  fs.writeFileSync(path.join(own, "moi.csv"), "Артикул;Конец\nPJ-1;5\n");
+  fs.writeFileSync(path.join(other, "chuzhoi.csv"), "Артикул;Конец\nSX-9;7\n");
+
+  try {
+    const mine = discoverChatFiles("test-chat-own");
+
+    assert.deepEqual(mine, ["data/telegram/test-chat-own/moi.csv"]);
+    assert.ok(!mine.some(file => file.includes("test-chat-other")));
+
+    // Автопоиск без чата не должен вытаскивать чужие загрузки.
+    assert.ok(
+      !discoverChatFiles(null).some(file => file.includes("data/telegram/"))
+    );
+  } finally {
+    fs.rmSync(own, { recursive: true, force: true });
+    fs.rmSync(other, { recursive: true, force: true });
+  }
+});
+
+test("memory does not drag bot-generated workbooks back into the pool", () => {
+  const dir = path.join(process.cwd(), "data", "telegram", "test-chat-memory");
+
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, "t1.csv"), "Артикул;Конец\nPJ-1;5\n");
+  fs.writeFileSync(path.join(dir, "sales-order-t1.csv"), "Артикул;Конец\nPJ-1;5\n");
+
+  try {
+    const files = resolveFiles({
+      query: "перенеси где реализация<20%",
+      memories: [
+        "Excel файл загружен: data/telegram/test-chat-memory/t1.csv",
+        "Excel файл загружен: data/telegram/test-chat-memory/sales-order-t1.csv"
+      ],
+      files: [],
+      chatId: "test-chat-memory"
+    });
+
+    assert.deepEqual(files, ["data/telegram/test-chat-memory/t1.csv"]);
+
+    // Явно названный в запросе файл фильтр не трогает.
+    assert.ok(
+      resolveFiles({
+        query: "перенеси data/telegram/test-chat-memory/sales-order-t1.csv",
+        memories: [],
+        files: [],
+        chatId: "test-chat-memory"
+      }).includes("data/telegram/test-chat-memory/sales-order-t1.csv")
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
