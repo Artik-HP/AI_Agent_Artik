@@ -3,8 +3,10 @@ import path from "node:path";
 import {
   discoverSpreadsheetFiles,
   existsInProject,
-  extractSpreadsheetPaths
+  extractSpreadsheetPaths,
+  sortByRecency
 } from "./reader.js";
+import { normalizePointCode } from "./points.js";
 
 /** Каталог, куда складываются все сформированные ботом книги. */
 export const OUTPUT_DIR = "exports";
@@ -119,6 +121,84 @@ export function discoverChatFiles(chatId = null) {
   return discoverSpreadsheetFiles(SHARED_DATA_DIR, {
     skipDirs: [TELEGRAM_DIR]
   });
+}
+
+/**
+ * @typedef {Object} FreshRecords
+ * @property {import("./deadStock.js").DeadStockRecord[]} records что осталось
+ * @property {{ point: string, kept: string, dropped: string[] }[]} skipped
+ */
+
+/**
+ * Оставляет по каждой торговой точке только самую свежую выгрузку.
+ *
+ * Пул копится месяцами, и одна и та же Т1 лежит сразу в нескольких файлах:
+ * «Т1 01.08-05.09», «Всі магазини 01.08-05.09», «Книга перемещения». Раньше
+ * движение по ней складывалось столько раз, сколько файлов её содержали —
+ * продажи утраивались, а вместе с ними и «сколько довезти». Снимки остатка
+ * при этом брались максимальные, так что ошибка была односторонней: бот
+ * возил больше, чем нужно.
+ *
+ * Свежесть — по времени изменения файла, а не по порядку в списке: пути
+ * приходят вперемешку из запроса, памяти и автопоиска.
+ * @param {import("./deadStock.js").DeadStockRecord[]} records
+ * @param {string[]} files пути, из которых эти записи прочитаны
+ * @returns {FreshRecords}
+ */
+export function keepFreshestPointRecords(records, files) {
+  const order = sortByRecency(files);
+  /** @type {Map<string, number>} */
+  const rankByName = new Map(
+    order.map((filePath, index) => [
+      String(filePath).split(/[\\/]/).pop() || String(filePath),
+      index
+    ])
+  );
+  /** @type {Map<string, { rank: number, file: string }>} */
+  const bestByPoint = new Map();
+
+  const pointKey = record =>
+    normalizePointCode(record.point) || String(record.point || "").trim();
+
+  for (const record of records) {
+    const key = pointKey(record);
+    const rank = rankByName.has(record.file)
+      ? Number(rankByName.get(record.file))
+      : Number.MAX_SAFE_INTEGER;
+    const best = bestByPoint.get(key);
+
+    if (!best || rank < best.rank) {
+      bestByPoint.set(key, { rank, file: record.file });
+    }
+  }
+
+  /** @type {Map<string, Set<string>>} */
+  const droppedByPoint = new Map();
+  const kept = records.filter(record => {
+    const key = pointKey(record);
+    const best = bestByPoint.get(key);
+
+    if (best && record.file === best.file) {
+      return true;
+    }
+
+    if (!droppedByPoint.has(key)) {
+      droppedByPoint.set(key, new Set());
+    }
+
+    droppedByPoint.get(key)?.add(record.file);
+
+    return false;
+  });
+
+  return {
+    records: kept,
+    skipped: [...droppedByPoint].map(([point, files_]) => ({
+      point,
+      kept: bestByPoint.get(point)?.file || "",
+      dropped: [...files_]
+    }))
+  };
 }
 
 /**

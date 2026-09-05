@@ -9,7 +9,11 @@ import {
   OUTPUT_DIR,
   resolveFiles
 } from "./shared.js";
-import { resolveProjectPath, toProjectPath } from "./reader.js";
+import {
+  readSheetMatrices,
+  resolveProjectPath,
+  toProjectPath
+} from "./reader.js";
 import { normalizePointCode } from "./points.js";
 
 /**
@@ -376,6 +380,53 @@ function applyOperation(workbook, operation) {
 }
 
 /**
+ * Список листов книги без её перезаписи. Отдельная ветка нужна потому, что
+ * читать книгу для показа и открывать её для правки — разные по требованиям
+ * задачи: показать можно почти любую книгу, а записать — только ту, что
+ * ExcelJS сумел разобрать целиком.
+ * @param {string} file путь как его назвал пользователь
+ * @param {string} fullPath
+ * @param {string[]} files все найденные книги
+ * @param {SheetsResult} empty заготовка результата
+ * @returns {SheetsResult}
+ */
+function listSheetsOnly(file, fullPath, files, empty) {
+  /** @type {string[]} */
+  const notes = [];
+
+  if (files.length > 1) {
+    notes.push(
+      `Нашёл несколько книг, взял первую: ${file}.`,
+      "Другую — назови файл в запросе."
+    );
+  }
+
+  try {
+    const names = readSheetMatrices(fullPath).map(sheet => sheet.name);
+
+    return {
+      ...empty,
+      status: "list",
+      file,
+      before: names,
+      after: names,
+      applied: [`показаны листы: ${names.length}`],
+      notes
+    };
+  } catch (error) {
+    return {
+      ...empty,
+      status: "needs_file",
+      file,
+      notes: [
+        `Не смог прочитать книгу ${file}.`,
+        `Причина: ${error instanceof Error ? error.message : String(error)}`
+      ]
+    };
+  }
+}
+
+/**
  * Управление листами книги.
  * @param {unknown} input
  * @returns {Promise<SheetsResult>}
@@ -441,9 +492,33 @@ export async function manageSheets(input) {
   }
 
   const fullPath = resolveProjectPath(file);
+  // Показать листы можно и без ExcelJS: он спотыкается о книги с
+  // картинками и чертежами (drawing.anchors), а такие выгрузки —
+  // обычное дело. Раньше кнопка «Листы» на них падала исключением.
+  const readOnly = operations.every(operation => operation.kind === "list");
+
+  if (readOnly) {
+    return listSheetsOnly(file, fullPath, files, empty);
+  }
+
   const workbook = new ExcelJS.Workbook();
 
-  await workbook.xlsx.readFile(fullPath);
+  try {
+    await workbook.xlsx.readFile(fullPath);
+  } catch (error) {
+    return {
+      ...empty,
+      status: "needs_file",
+      file,
+      notes: [
+        `Не смог открыть книгу ${file} для правки.`,
+        "Скорее всего, внутри есть картинки, диаграммы или объекты, которые",
+        "библиотека записи не читает. Пересохрани файл в Excel как .xlsx",
+        "без картинок — и пришли снова.",
+        `Причина: ${error instanceof Error ? error.message : String(error)}`
+      ]
+    };
+  }
 
   const before = workbook.worksheets.map(sheet => sheet.name);
   /** @type {string[]} */

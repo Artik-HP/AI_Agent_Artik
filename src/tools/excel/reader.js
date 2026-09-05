@@ -358,6 +358,35 @@ export function extractNamedSpreadsheetPaths(text, labels) {
 }
 
 /**
+ * Убирает из текста запроса пути к таблицам, оставляя только слова человека.
+ *
+ * Своими силами это делали два места, и оба одинаково ломались на путях с
+ * пробелами: шаблон `\S+\.xlsx` обрывается на первом пробеле, и хвост пути
+ * («…/1788545822690-Т1») оставался внутри искомой фразы. «Оставь только pjur
+ * data/Т1 18.06.xlsx» искал строки со словами «pjur data/Т1» и находил ноль.
+ * Здесь путь вырезается тем же разбором, что и находит его, — вместе с
+ * кавычками, если он был закавычен.
+ * @param {string} text
+ * @returns {string}
+ */
+export function stripSpreadsheetPaths(text) {
+  let result = String(text || "");
+
+  for (const filePath of extractSpreadsheetPaths(result)) {
+    for (const variant of [
+      `"${filePath}"`,
+      `'${filePath}'`,
+      `«${filePath}»`,
+      filePath
+    ]) {
+      result = result.split(variant).join(" ");
+    }
+  }
+
+  return result.replace(/\s+/g, " ").trim();
+}
+
+/**
  * @typedef {Object} SheetMatrix
  * @property {string} name имя вкладки
  * @property {unknown[][]} rows строки как массивы ячеек (header: 1)
@@ -386,6 +415,104 @@ export function readSheetMatrices(filePath, options = {}) {
       blankrows: false
     })
   }));
+}
+
+/**
+ * Строка-склад отчёта движения: в первой колонке название точки, вторая
+ * (наименование) пустая, дальше идут числа. Именно ею 1С открывает блок
+ * каждого магазина.
+ * @param {unknown[]} row
+ * @returns {boolean}
+ */
+export function looksLikeSectionRow(row) {
+  const cells = Array.isArray(row) ? row : [];
+  const first = String(cells[0] ?? "").trim();
+  const second = String(cells[1] ?? "").trim();
+
+  if (!first || second || /^\d/.test(first)) {
+    return false;
+  }
+
+  // «Разом»/«Итого» — строка итога, а не склад.
+  if (/^(?:разом|итого|всього|всего|total)$/i.test(first)) {
+    return false;
+  }
+
+  // Артикул с пустым наименованием — не склад. В реальной выгрузке такие
+  // строки есть («SO8611» без названия), и раньше каждая из них открывала
+  // новый фантомный «магазин»: всё, что шло дальше по листу, уезжало на него.
+  // Название точки либо содержит пробел («Toppers 02 Lviv Staroevreyska»),
+  // либо не содержит цифр, либо это голый код точки вида «Т1».
+  const looksLikePointName =
+    /\s/.test(first) || !/\d/.test(first) || /^[ТTХXтtхx]\s*-?\s*\d{1,3}$/.test(first);
+
+  if (!looksLikePointName) {
+    return false;
+  }
+
+  return cells.slice(2).some(cell => {
+    const text = String(cell ?? "").replace(/\s/g, "").replace(",", ".");
+
+    return text !== "" && Number.isFinite(Number(text));
+  });
+}
+
+/**
+ * Отбирает вкладки, которые действительно являются выгрузкой движения.
+ *
+ * Люди держат в той же книге свои рабочие листы: «40% і більше» (отфильтрованная
+ * копия), «Замовлення» (черновик заказа). Раньше читались все вкладки подряд, и
+ * каждая становилась отдельной «торговой точкой»: в заказе по одному реальному
+ * файлу 211 позиций из 515 приезжали с листа-черновика — тот же товар второй раз.
+ *
+ * Признак настоящей выгрузки — строка-склад: 1С открывает ею блок каждого
+ * магазина, а ручная копия строк её не содержит. Если строк-складов нет нигде
+ * (выгрузка без группировки по складам, книга перемещения с листами-магазинами),
+ * возвращаем всё как было — молча потерять данные хуже, чем прочитать лишнее.
+ * @param {SheetMatrix[]} sheets
+ * @returns {SheetMatrix[]}
+ */
+export function selectReportSheets(sheets) {
+  const list = Array.isArray(sheets) ? sheets : [];
+  const withSection = list.filter(sheet =>
+    (Array.isArray(sheet.rows) ? sheet.rows : []).some(looksLikeSectionRow)
+  );
+
+  return withSection.length > 0 ? withSection : list;
+}
+
+/**
+ * Книга — это выгрузка движения из 1С, а не рукописный список?
+ *
+ * Признак прямой: строка-склад («Toppers 07 …») или служебная шапка выгрузки
+ * («Номенклатура.Артикул»). Оба встречаются только в отчёте.
+ *
+ * Нужен там, где под команду подсовывают не тот файл: книга перемещения и
+ * выгрузка движения обе про товар, обе .xlsx, и разбор перемещения молча
+ * выдавал по строке на каждый товар отчёта.
+ * @param {string} filePath
+ * @returns {boolean}
+ */
+export function looksLikeMovementReport(filePath) {
+  try {
+    return readSheetMatrices(filePath).some(sheet => {
+      const rows = Array.isArray(sheet.rows) ? sheet.rows : [];
+      const head = rows
+        .slice(0, 3)
+        .flat()
+        .map(cell => String(cell ?? "").toLowerCase())
+        .join(" ");
+
+      return (
+        head.includes("номенклатура.артикул") ||
+        head.includes("мiсце зберiгання") ||
+        head.includes("місце зберігання") ||
+        rows.some(looksLikeSectionRow)
+      );
+    });
+  } catch {
+    return false;
+  }
 }
 
 /**

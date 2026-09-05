@@ -296,6 +296,115 @@ export function parseDestinationPoint(query) {
 }
 
 /**
+ * Слова, на которых перечисление точек заканчивается: предлоги следующего
+ * куска запроса и начало условия.
+ */
+const ENUMERATION_STOP =
+  /^(?:на|в|у|to|со|с|из|з|від|from|где|де|куди|кроме|окрім|крім|except|без|период|перiод|період|дней|днів|days)$/i;
+
+/**
+ * Все точки, перечисленные после предлога: «с Т1, Т7 и Т9» → [Т1, Т7, Т9].
+ *
+ * Одной точки мало: развозят обычно из нескольких магазинов сразу, и раньше
+ * приходилось звать бота отдельно на каждый. Перечисление кончается там, где
+ * начинается слово, которое точкой не является («где», «на», «кроме»).
+ * @param {string} query
+ * @param {RegExp} preposition
+ * @returns {string[]} канонические коды, пустой массив — не указано
+ */
+function findPointsAfter(query, preposition) {
+  const text = String(query || "");
+  const match = preposition.exec(text);
+
+  if (!match) {
+    return [];
+  }
+
+  /** @type {string[]} */
+  const codes = [];
+  const tokens = text
+    .slice(match.index + match[0].length)
+    .split(/[,;]+|\s+/)
+    .map(token => token.trim())
+    .filter(Boolean);
+  let at = 0;
+
+  while (at < tokens.length) {
+    // Следующий предлог или служебное слово закрывает перечисление. Без этой
+    // проверки «с Т1, Т7 на Т10» отдавало источниками и Т10: normalizePointCode
+    // сам срезает ведущее «на», и пара «на Т10» опознавалась как точка.
+    if (ENUMERATION_STOP.test(tokens[at])) {
+      break;
+    }
+
+    // Соединители перечисления пропускаем молча.
+    if (/^(?:и|та|and|\+|&)$/i.test(tokens[at])) {
+      at += 1;
+      continue;
+    }
+
+    // Сначала пара слов: «Toppers 1», «ХОХО 2» — точка называется двумя.
+    const pair = normalizePointCode(tokens.slice(at, at + 2).join(" "));
+
+    if (pair) {
+      codes.push(pair);
+      at += 2;
+      continue;
+    }
+
+    const single = normalizePointCode(tokens[at]);
+
+    if (single) {
+      codes.push(single);
+      at += 1;
+      continue;
+    }
+
+    // Первое слово, которое точкой не является, закрывает перечисление:
+    // «с Т1, Т7 где реализация<20%» — «где» уже не склад. Если не нашли
+    // ничего за первые два слова — предлог был не про склад вовсе.
+    if (codes.length > 0 || at >= 1) {
+      break;
+    }
+
+    at += 1;
+  }
+
+  return [...new Set(codes)];
+}
+
+/**
+ * Склады-источники: «перенеси с Т1, Т7 …». Пустой массив — любой подходящий.
+ * @param {string} query
+ * @returns {string[]}
+ */
+export function parseSourcePoints(query) {
+  return findPointsAfter(query, /(?:^|[\s,(])(?:со|с|из|від|з|from)(?=[\s:=])/iu);
+}
+
+/**
+ * Склады-получатели: «… на Т9 и Т10». Пустой массив — кому товар нужен.
+ * @param {string} query
+ * @returns {string[]}
+ */
+export function parseDestinationPoints(query) {
+  return findPointsAfter(query, /(?:^|[\s,(])(?:на|в|у|to)(?=[\s:=])/iu);
+}
+
+/**
+ * Точки, которые трогать нельзя: «кроме Т5 и Х2». Исключение сильнее любого
+ * перечисления — им закрывают магазин на ремонт или инвентаризацию.
+ * @param {string} query
+ * @returns {string[]}
+ */
+export function parseExcludedPoints(query) {
+  return findPointsAfter(
+    query,
+    /(?:^|[\s,(])(?:кроме|окрім|крім|except|без)(?=[\s:=])/iu
+  );
+}
+
+/**
  * Забывает выученные имена. Только для тестов: реестр — модульный синглтон,
  * и без сброса один тест видел бы точки из другого.
  * @returns {void}
