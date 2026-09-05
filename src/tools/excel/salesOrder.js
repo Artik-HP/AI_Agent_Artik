@@ -7,6 +7,7 @@ import { MOVEMENT_LABELS } from "./columns.js";
 import {
   createTimestamp,
   discoverChatFiles,
+  keepFreshestPointRecords,
   looksLikeGeneratedReport,
   OUTPUT_DIR
 } from "./shared.js";
@@ -16,6 +17,7 @@ import {
   normalizeHeader,
   readSheetMatrices,
   resolveProjectPath,
+  selectReportSheets,
   sheetPointName,
   toProjectPath
 } from "./reader.js";
@@ -478,9 +480,13 @@ function findTransferFiles(query, memories, chatId = null, primary = null) {
  */
 export function hasSalesOrderReport(input) {
   const request = normalizeInput(input);
+  // chatId обязателен: без него findReportFile не смотрит в загрузки чата, и
+  // «заказ поставщику» с пустой памятью уходил в ветку остатки+прайс с ответом
+  // «Это не похоже на файл остатков» — при том, что нужный отчёт лежал в пуле.
   const sourceFile = findReportFile(
     request.query,
-    request.memories
+    request.memories,
+    request.chatId
   );
 
   return Boolean(sourceFile && isLikelyMovementReport(sourceFile));
@@ -743,7 +749,9 @@ function combineSheetLines(lines) {
  * @returns {{ lines: SalesOrderLine[], stats: SalesOrderStats }}
  */
 function readReport(filePath, options) {
-  const sheets = readSheetMatrices(filePath, { raw: true });
+  // Только вкладки настоящей выгрузки: рабочие листы человека («40% і більше»,
+  // «Замовлення») раньше становились отдельными точками и удваивали заказ.
+  const sheets = selectReportSheets(readSheetMatrices(filePath, { raw: true }));
   /** @type {SalesOrderLine[]} */
   const lines = [];
   const stats = {
@@ -836,15 +844,21 @@ function buildOrderTransferPlan(files, orderLines, options) {
     records.push(...readReportFile(file).records);
   }
 
-  const bySku = buildPointMetrics(records, options.periodDays, settings.coverDays);
+  const fresh = keepFreshestPointRecords(records, files);
+  const bySku = buildPointMetrics(
+    fresh.records,
+    options.periodDays,
+    settings.coverDays
+  );
   // Артикул, попавший в заказ, из перемещения исключаем: одна и та же позиция
   // не должна одновременно докупаться и переезжать.
   const ordered = new Set(
     orderLines.map(line => normalizeSkuKey(line.sku)).filter(Boolean)
   );
   const plan = planTransfers(bySku, {
-    source: null,
-    destination: null,
+    sources: [],
+    destinations: [],
+    excluded: [],
     maxStockDays: settings.maxStockDays,
     minBatch: settings.minBatch,
     exclusions: settings.exclusions,

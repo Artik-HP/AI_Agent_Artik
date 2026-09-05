@@ -7,6 +7,7 @@ import {
 } from "./shared.js";
 import { writeReportWorkbook } from "./writer.js";
 import {
+  looksLikeMovementReport,
   resolveProjectPath,
   toProjectPath
 } from "./reader.js";
@@ -203,9 +204,43 @@ function looksLikeQuantity(value) {
 }
 
 /**
- * Разбирает строку листа: находит артикул и собирает остальное в примечание.
+ * Выбирает из строки ячейку с артикулом.
+ *
+ * Осторожность нужна из-за колонки нумерации: «10» формально проходит
+ * looksLikeSku (две цифры, без пробелов) и раньше побеждала настоящий артикул,
+ * который уезжал в примечание. Поэтому среди кандидатов сначала берём тот, где
+ * есть буква (SO3206, PJ10440, 62530064-00132), затем — длинный (числовые
+ * артикулы вроде 81240000226 существуют), и только потом первый попавшийся.
+ * @param {string[]} cells
+ * @returns {number} индекс артикула, -1 если строка не товарная
+ */
+function findSkuIndex(cells) {
+  const candidates = cells
+    .map((cell, index) => ({ cell, index }))
+    .filter(item => looksLikeSku(item.cell));
+
+  if (candidates.length === 0) {
+    return -1;
+  }
+
+  const lettered = candidates.find(item => /\p{L}/u.test(item.cell));
+
+  if (lettered) {
+    return lettered.index;
+  }
+
+  // Числовой артикул существует (108, 203, 2031, 81240000226), но он не
+  // короче трёх знаков. Двузначное число в строке итога («Разом | 22»)
+  // артикулом не является.
+  const numeric = candidates.find(item => item.cell.length >= 3);
+
+  return numeric ? numeric.index : -1;
+}
+
+/**
+ * Разбирает строку листа: находит артикул, количество и примечание.
  * @param {unknown[]} row
- * @returns {{ sku: string, note: string }|null}
+ * @returns {{ sku: string, qty: number|null, note: string }|null}
  */
 function parseTransferRow(row) {
   const cells = (Array.isArray(row) ? row : [])
@@ -216,26 +251,35 @@ function parseTransferRow(row) {
     return null;
   }
 
-  // Шапка «Артикул | Кількість» встречается не всегда, но когда встречается —
-  // прошлый разбор записывал её отдельной позицией перемещения.
-  if (/^(?:артикул|номенклатура|товар|назва|назван|код|sku)/i.test(cells[0])) {
+  // Строка итога: «Разом | 22», «Всього | 5». Числа из неё удваивали сводку.
+  if (/^(?:разом|итого|всього|всего|подытог|total)\b/i.test(cells[0])) {
     return null;
   }
 
-  const skuIndex = cells.findIndex(looksLikeSku);
-  const skuAt = skuIndex === -1 ? 0 : skuIndex;
+  const skuAt = findSkuIndex(cells);
+
+  // Нет ничего похожего на артикул — это шапка («Найменування | Кількість»),
+  // строка итога («Разом | 5») или пометка. Раньше такая строка всё равно
+  // становилась позицией перемещения: первая ячейка шла артикулом, а итог
+  // удваивал количество единиц в сводке.
+  if (skuAt === -1) {
+    return null;
+  }
+
   const sku = cells[skuAt];
-  // Количество — соседнее число: в книгах со скриншота это колонка B рядом с
-  // артикулом. Раньше оно уезжало в примечание, а колонка «Кол-во» уходила
-  // пользователю пустой с советом заполнить руками.
-  const qtyIndex = cells.findIndex(
-    (cell, index) => index !== skuAt && looksLikeQuantity(cell)
-  );
-  const qty = qtyIndex === -1
-    ? null
-    : Number(cells[qtyIndex].replace(",", "."));
+  // Количество — ячейка СПРАВА от артикула, а не первое число в строке:
+  // слева часто стоит колонка нумерации, и «1» побеждала настоящие «12».
+  const next = cells[skuAt + 1];
+  const qty = next !== undefined && looksLikeQuantity(next)
+    ? Number(next.replace(",", "."))
+    : null;
+  const qtyAt = qty === null ? -1 : skuAt + 1;
+  // Первая ячейка перед артикулом, если это короткое целое, — колонка
+  // нумерации «№». В примечании она только мешает читать документ.
+  const numberingAt = skuAt === 1 && /^\d{1,4}$/.test(cells[0]) ? 0 : -1;
   const note = cells
-    .filter((_, index) => index !== skuAt && index !== qtyIndex)
+    .filter((_, index) =>
+      index !== skuAt && index !== qtyAt && index !== numberingAt)
     .join("; ");
 
   return { sku, qty, note };
@@ -256,8 +300,16 @@ function readTransferFile(filePath, fileRoute) {
 
   for (const sheetName of workbook.SheetNames) {
     const route = parseSheetRoute(sheetName);
-    const from = route.from || fileRoute.from || UNKNOWN_LOCATION;
-    const to = route.to || fileRoute.to || UNKNOWN_LOCATION;
+    // «переміщення на Т1_з Т2_з Т7»: получатель назван в имени файла, листы —
+    // это источники. Лист «з Т2» разбирается верно сам, а лист, подписанный
+    // просто «Т7», по общему правилу считался бы получателем — и маршрут
+    // разворачивался в «не знаю → Т7» вместо «Т7 → Т1».
+    const sheetNamesSource =
+      Boolean(fileRoute.to) && !route.from && Boolean(route.to);
+    const from = (sheetNamesSource ? route.to : route.from) ||
+      fileRoute.from || UNKNOWN_LOCATION;
+    const to = (sheetNamesSource ? fileRoute.to : route.to) ||
+      fileRoute.to || UNKNOWN_LOCATION;
     const rows = xlsx.utils.sheet_to_json(workbook.Sheets[sheetName], {
       header: 1,
       defval: "",
@@ -422,12 +474,40 @@ export async function buildTransferDoc(input) {
     };
   }
 
+  // Под «перемещение» регулярно подсовывают обычную выгрузку движения — она
+  // тоже книга Excel, тоже про товар, и разбор молча выдавал по строке на
+  // каждый товар отчёта: «Со склада: не знаю, 8784 позиции». Лучше объяснить,
+  // чем выдать документ, по которому кладовщик поедет.
+  const transferFiles = files.filter(file => !looksLikeMovementReport(file));
+
+  if (transferFiles.length === 0) {
+    return {
+      status: "needs_file",
+      from: UNKNOWN_LOCATION,
+      files,
+      lines: [],
+      outputPath: null,
+      stats: { sheets: 0, lines: 0, units: 0, withQty: 0, byRoute: {} },
+      notes: [
+        `Это выгрузка движения, а не книга перемещения: ${files[0]}.`,
+        "Книга перемещения — это листы-маршруты («Т10 на Т1»), в каждом",
+        "столбик артикулов и количество.",
+        "",
+        "Что можно сделать:",
+        "• «шаблон перемещения с Т10» — пришлю готовую книгу, останется вписать артикулы",
+        "• «Т10 на Т1: SO3206 12» — перемещение прямо сообщением",
+        "• «развези по продажам» или «перенеси где реализация<20%» — бот сам решит,",
+        "  что и куда везти по этой же выгрузке"
+      ]
+    };
+  }
+
   /** @type {TransferLine[]} */
   const lines = [];
   const sheets = new Set();
   let from = UNKNOWN_LOCATION;
 
-  for (const file of files) {
+  for (const file of transferFiles) {
     const fileName = toProjectPath(resolveProjectPath(file)).split("/").pop() || file;
     const fileRoute = {
       from: resolveSource(request.query, fileName),

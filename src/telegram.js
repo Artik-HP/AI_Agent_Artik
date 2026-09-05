@@ -14,19 +14,16 @@ import { logError, logInfo } from "./utils/logger.js";
 import { describeRunningCode } from "./version.js";
 
 const agents = new Map();
+const GUIDE_FILE_PATH = "D:/telegram excel/Справка — команды Telegram Excel.txt";
 const SPREADSHEET_EXTENSIONS = new Set([
   ".csv",
   ".xls",
   ".xlsx"
 ]);
 
-/** callback_data кнопки «Заказ поставщику» под сообщением о загрузке файла. */
-const SUPPLIER_ORDER_ACTION = "supplier_order";
 /** Фраза, которую понимает agent.process как запрос на замовлення Т1. */
 const SUPPLIER_ORDER_PHRASE = "Подготовь заказ поставщику.";
 
-/** callback_data кнопки «Заказ: презервативы + лубриканты». */
-const SUPPLIER_ORDER_CATEGORIES_ACTION = "supplier_order_categories";
 /**
  * Та же команда заказа, но суженная до закупаемых категорий. Признак сужения
  * для salesOrder — название категории в тексте, поэтому фраза их называет.
@@ -34,23 +31,21 @@ const SUPPLIER_ORDER_CATEGORIES_ACTION = "supplier_order_categories";
 const SUPPLIER_ORDER_CATEGORIES_PHRASE =
   "Подготовь заказ поставщику только по презервативам и лубрикантам.";
 
-/** callback_data кнопки «Непроданное» под сообщением о загрузке файла. */
-const DEAD_STOCK_ACTION = "dead_stock";
 /** Фраза, которую agent.process маршрутизирует в отчёт по непроданному. */
 const DEAD_STOCK_PHRASE = "Собери непроданное за период.";
 
-/** callback_data кнопки «Перемещение» под сообщением о загрузке файла. */
-const TRANSFER_ACTION = "transfer_doc";
+/**
+ * Шаблон просит назвать склад-источник — без него бот не знает, из какого
+ * магазина везём, и вернёт список известных точек.
+ */
+const TRANSFER_TEMPLATE_PHRASE = "Шаблон перемещения.";
+
 /** Фраза, которую agent.process маршрутизирует в документ перемещения. */
 const TRANSFER_PHRASE = "Собери документ перемещения.";
 
-/** callback_data кнопки «Развезти по продажам» (перераспределение остатков). */
-const REDISTRIBUTE_ACTION = "redistribute";
 /** Фраза для маршрутизации в перемещение по нулевым продажам. */
 const REDISTRIBUTE_PHRASE = "Перемещение по нулевым продажам.";
 
-/** callback_data кнопки, открывающей меню условий переноса. */
-const CRITERIA_MENU_ACTION = "criteria_menu";
 /** Префикс callback_data пресетов условия. Ограничение Telegram — 64 байта. */
 const CRITERIA_PREFIX = "crit:";
 
@@ -86,6 +81,141 @@ export const CRITERIA_PRESETS = [
     phrase: "Перенеси где остаток>10 реализация<40%"
   }
 ];
+
+/** Префикс callback_data кнопок Excel-меню. Ограничение Telegram — 64 байта. */
+const EXCEL_PREFIX = "xl:";
+
+/**
+ * Всё, что бот умеет делать с Excel, одним списком: подпись кнопки и фраза,
+ * которую понимает agent.process.
+ *
+ * Раньше на каждую кнопку была своя константа и свой почти одинаковый
+ * обработчик — семь копий одной функции. Из-за этого половина возможностей
+ * бота (листы, аналитика, поиск, фильтр) кнопок так и не получила: добавить
+ * их стоило дороже, чем сказать пользователю «напиши текстом».
+ *
+ * `phrase` — действие выполняется сразу. `hint` — действию нужен текст от
+ * человека (что искать, что оставить), поэтому кнопка объясняет формат.
+ * `menu` — кнопка открывает второй уровень (пороги переноса).
+ * @type {{ id: string, label: string, phrase?: string, hint?: string[], menu?: string, notice?: string }[]}
+ */
+export const EXCEL_ACTIONS = [
+  {
+    id: "order",
+    label: "📦 Заказ поставщику",
+    phrase: SUPPLIER_ORDER_PHRASE,
+    notice: "Готовлю заказ..."
+  },
+  {
+    id: "order_categories",
+    label: "🧴 Заказ: презервативы+лубриканты",
+    phrase: SUPPLIER_ORDER_CATEGORIES_PHRASE,
+    notice: "Готовлю заказ по категориям..."
+  },
+  {
+    id: "dead_stock",
+    label: "🗂 Непроданное",
+    phrase: DEAD_STOCK_PHRASE,
+    notice: "Собираю непроданное..."
+  },
+  {
+    id: "redistribute",
+    label: "♻️ Развезти по продажам",
+    phrase: REDISTRIBUTE_PHRASE,
+    notice: "Считаю перемещение..."
+  },
+  {
+    id: "criteria",
+    label: "🎯 Перенос по условию",
+    menu: "criteria"
+  },
+  {
+    id: "transfer",
+    label: "🔀 Перемещение из книги",
+    phrase: TRANSFER_PHRASE,
+    notice: "Разбираю книгу перемещения..."
+  },
+  {
+    id: "transfer_template",
+    label: "📄 Шаблон перемещения",
+    phrase: TRANSFER_TEMPLATE_PHRASE,
+    notice: "Собираю шаблон..."
+  },
+  {
+    id: "sheets",
+    label: "📑 Листы книги",
+    phrase: "Покажи листы.",
+    notice: "Смотрю листы..."
+  },
+  {
+    id: "analytics",
+    label: "📊 Аналитика",
+    phrase: "Аналитика по excel-файлу.",
+    notice: "Считаю сводку..."
+  },
+  {
+    id: "search",
+    label: "🔎 Найти товар",
+    hint: [
+      "Что найти? Напиши: «найди PJ10050 в таблице».",
+      "Ищу по всем колонкам последней присланной таблицы."
+    ]
+  },
+  {
+    id: "filter",
+    label: "✂️ Оставить только…",
+    hint: [
+      "Что оставить? Напиши: «оставь только pjur».",
+      "Вырежу из файла все строки, кроме тех, где это есть в названии.",
+      "Исходный файл не меняю — пришлю новый."
+    ]
+  },
+  {
+    id: "help",
+    label: "📖 Команды и примеры",
+    // «/excel» без аргументов — это и есть справка Excel-модуля.
+    phrase: "/excel",
+    notice: "Показываю команды..."
+  },
+  {
+    id: "text_transfer",
+    label: "✍️ Перемещение сообщением",
+    hint: [
+      "Напиши маршрут и позиции — Excel не нужен:",
+      "",
+      "Т10 на Т1: SO3206 12, PJ10440 2",
+      "Т10 на Х2: BIO_2005 1",
+      "",
+      "Количество можно не писать. Коды точек — как удобно: т10, T10, Х2."
+    ]
+  }
+];
+
+/**
+ * Меню Excel: по две кнопки в ряд — так подписи целиком видны и на телефоне.
+ * @returns {ReturnType<typeof Markup.inlineKeyboard>}
+ */
+function excelKeyboard() {
+  /** @type {ReturnType<typeof Markup.button.callback>[][]} */
+  const rows = [];
+
+  for (const action of EXCEL_ACTIONS) {
+    const button = Markup.button.callback(
+      action.label,
+      EXCEL_PREFIX + action.id
+    );
+    const lastRow = rows[rows.length - 1];
+
+    if (lastRow && lastRow.length < 2) {
+      lastRow.push(button);
+      continue;
+    }
+
+    rows.push([button]);
+  }
+
+  return Markup.inlineKeyboard(rows);
+}
 
 const MAIN_KEYBOARD = Markup.keyboard([
   [
@@ -362,6 +492,19 @@ async function handleTextMessage(ctx) {
   const userText = normalizeTelegramText((ctx.message && 'text' in ctx.message ? ctx.message.text : undefined) ?? "");
 
   try {
+    if (userText.trim().toLowerCase() === "/справка") {
+      if (!fs.existsSync(GUIDE_FILE_PATH)) {
+        await ctx.reply("Файл справки не найден. Проверь: " + GUIDE_FILE_PATH);
+        return;
+      }
+
+      const guideText = await fs.promises.readFile(GUIDE_FILE_PATH, "utf8");
+      for (const chunk of splitMessage(guideText.trim() || "Файл справки пуст.", 3900)) {
+        await ctx.reply(chunk);
+      }
+      return;
+    }
+
     const agent = getAgent(chatId);
     const answer = await agent.process(userText);
 
@@ -458,27 +601,10 @@ async function handleDocumentMessage(ctx) {
       [
         `✅ Файл получил: ${projectPath}`,
         "",
-        "Что дальше — просто напиши:",
-        "• «Заказ поставщику» — соберу замовлення Т1 в Excel",
-        "• «Непроданное» — товары без розничных и оптовых продаж за период",
-        "• «Развезти по продажам» — вывезти оттуда, где не продаётся, туда, где продаётся",
-        "• «Перенеси где реализация<20%» — перенос по условию (реализация, продаж, остаток, запас)",
-        "• «Перемещение» — список артикулов по листам-магазинам → один документ",
-        "• «Оставь только <текст>» — вырежу все строки, кроме нужных по названию",
-        "• «Аналитика» — краткая сводка по файлу",
-        "• «Найди <текст>» — поиск строк в таблице"
+        "Выбери, что с ним сделать — или напиши словами.",
+        "Файлы накапливаются: отчёты по разным точкам считаются вместе."
       ].join("\n"),
-      Markup.inlineKeyboard([
-        [Markup.button.callback("📦 Заказ поставщику", SUPPLIER_ORDER_ACTION)],
-        [Markup.button.callback(
-          "🧴 Заказ: презервативы + лубриканты",
-          SUPPLIER_ORDER_CATEGORIES_ACTION
-        )],
-        [Markup.button.callback("🗂 Непроданное", DEAD_STOCK_ACTION)],
-        [Markup.button.callback("♻️ Развезти по продажам", REDISTRIBUTE_ACTION)],
-        [Markup.button.callback("🎯 Перенос по условию", CRITERIA_MENU_ACTION)],
-        [Markup.button.callback("🔀 Перемещение", TRANSFER_ACTION)]
-      ])
+      excelKeyboard()
     );
   } catch (error) {
     await handleTelegramError(ctx, error);
@@ -486,75 +612,41 @@ async function handleDocumentMessage(ctx) {
 }
 
 /**
- * Кнопка «Заказ поставщику» под сообщением о загрузке файла.
+ * Обработчик всех кнопок Excel-меню: находит действие в реестре и выполняет
+ * его — фразой агенту, подсказкой или вторым уровнем меню.
  * @param {import("telegraf").Context} ctx
  */
-async function handleSupplierOrderAction(ctx) {
+async function handleExcelAction(ctx) {
   const chatId = ctx.chat?.id;
+  const id = String(
+    (ctx.match && Array.isArray(ctx.match) ? ctx.match[1] : undefined) || ""
+  );
+  const action = EXCEL_ACTIONS.find(item => item.id === id);
 
   try {
-    await ctx.answerCbQuery("Готовлю заказ...");
+    if (!action) {
+      await ctx.answerCbQuery("Такой кнопки больше нет — открой меню заново.");
+
+      return;
+    }
+
+    if (action.menu === "criteria") {
+      await handleCriteriaMenuAction(ctx);
+
+      return;
+    }
+
+    if (action.hint) {
+      await ctx.answerCbQuery();
+      await ctx.reply(action.hint.join("\n"), MAIN_KEYBOARD);
+
+      return;
+    }
+
+    await ctx.answerCbQuery(action.notice || "Считаю...");
 
     const agent = getAgent(chatId);
-    const answer = await agent.process(SUPPLIER_ORDER_PHRASE);
-
-    await replyAgentAnswer(ctx, answer);
-  } catch (error) {
-    await handleTelegramError(ctx, error);
-  }
-}
-
-/**
- * Кнопка «Заказ: презервативы + лубриканты» — тот же заказ, суженный до
- * закупаемых категорий.
- * @param {import("telegraf").Context} ctx
- */
-async function handleSupplierOrderCategoriesAction(ctx) {
-  const chatId = ctx.chat?.id;
-
-  try {
-    await ctx.answerCbQuery("Готовлю заказ по категориям...");
-
-    const agent = getAgent(chatId);
-    const answer = await agent.process(SUPPLIER_ORDER_CATEGORIES_PHRASE);
-
-    await replyAgentAnswer(ctx, answer);
-  } catch (error) {
-    await handleTelegramError(ctx, error);
-  }
-}
-
-/**
- * Кнопка «Непроданное» под сообщением о загрузке файла.
- * @param {import("telegraf").Context} ctx
- */
-async function handleDeadStockAction(ctx) {
-  const chatId = ctx.chat?.id;
-
-  try {
-    await ctx.answerCbQuery("Собираю непроданное...");
-
-    const agent = getAgent(chatId);
-    const answer = await agent.process(DEAD_STOCK_PHRASE);
-
-    await replyAgentAnswer(ctx, answer);
-  } catch (error) {
-    await handleTelegramError(ctx, error);
-  }
-}
-
-/**
- * Кнопка «Развезти по продажам»: перемещение с нулевых точек на продающие.
- * @param {import("telegraf").Context} ctx
- */
-async function handleRedistributeAction(ctx) {
-  const chatId = ctx.chat?.id;
-
-  try {
-    await ctx.answerCbQuery("Считаю перемещение...");
-
-    const agent = getAgent(chatId);
-    const answer = await agent.process(REDISTRIBUTE_PHRASE);
+    const answer = await agent.process(action.phrase);
 
     await replyAgentAnswer(ctx, answer);
   } catch (error) {
@@ -581,9 +673,14 @@ async function handleCriteriaMenuAction(ctx) {
         "остаётся на месте.",
         "",
         "Свой порог — текстом: «перенеси где реализация<15%».",
-        "Один магазин-источник: «перенеси с Т5 где реализация<15%»",
-        "(понимаю и «с toppers 1», и «с т1»).",
-        "Конкретный получатель: «перенеси с т1 на т9 где остаток>3».",
+        "",
+        "Маршрут задаётся полностью:",
+        "• откуда: «перенеси с Т1, Т7 и Т9 где реализация<20%»",
+        "• куда: «перенеси с Т1 на Т9 и Т10 где остаток>3»",
+        "• исключить магазин: «… кроме Т5»",
+        "Названия понимаю любые: «с т1», «с Toppers 1», «на ХОХО 2».",
+        "",
+        "Условия можно совмещать: «перенеси с Т1 где остаток>10 реализация<40%».",
         "Если период не виден в имени файла — допиши «период=30»."
       ].join("\n"),
       Markup.inlineKeyboard(
@@ -619,25 +716,6 @@ async function handleCriteriaPresetAction(ctx) {
 
     const agent = getAgent(chatId);
     const answer = await agent.process(preset.phrase);
-
-    await replyAgentAnswer(ctx, answer);
-  } catch (error) {
-    await handleTelegramError(ctx, error);
-  }
-}
-
-/**
- * Кнопка «Перемещение» под сообщением о загрузке файла.
- * @param {import("telegraf").Context} ctx
- */
-async function handleTransferAction(ctx) {
-  const chatId = ctx.chat?.id;
-
-  try {
-    await ctx.answerCbQuery("Собираю перемещение...");
-
-    const agent = getAgent(chatId);
-    const answer = await agent.process(TRANSFER_PHRASE);
 
     await replyAgentAnswer(ctx, answer);
   } catch (error) {
@@ -713,16 +791,8 @@ export async function startTelegramBot() {
     );
   });
 
-  bot.action(SUPPLIER_ORDER_ACTION, handleSupplierOrderAction);
-  bot.action(
-    SUPPLIER_ORDER_CATEGORIES_ACTION,
-    handleSupplierOrderCategoriesAction
-  );
-  bot.action(DEAD_STOCK_ACTION, handleDeadStockAction);
-  bot.action(REDISTRIBUTE_ACTION, handleRedistributeAction);
-  bot.action(CRITERIA_MENU_ACTION, handleCriteriaMenuAction);
   bot.action(new RegExp(`^${CRITERIA_PREFIX}(.+)$`), handleCriteriaPresetAction);
-  bot.action(TRANSFER_ACTION, handleTransferAction);
+  bot.action(new RegExp(`^${EXCEL_PREFIX}(.+)$`), handleExcelAction);
   bot.on("text", handleTextMessage);
   bot.on("voice", handleSpeechMessage);
   bot.on("audio", handleSpeechMessage);

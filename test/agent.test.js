@@ -7,7 +7,11 @@ import ExcelJS from "exceljs";
 
 import Agent, { shouldUseExcelTool } from "../src/agent.js";
 import * as memory from "../src/memory.js";
-import { CRITERIA_PRESETS, sanitizeFileName } from "../src/telegram.js";
+import {
+  CRITERIA_PRESETS,
+  EXCEL_ACTIONS,
+  sanitizeFileName
+} from "../src/telegram.js";
 import {
   existsInProject,
   extractNamedSpreadsheetPaths,
@@ -27,8 +31,18 @@ import {
 import {
   comparePointCodes,
   normalizePointCode,
-  parseDestinationPoint
+  parseDestinationPoint,
+  parseDestinationPoints,
+  parseExcludedPoints,
+  parseSourcePoints,
+  rememberPointName,
+  resetPointRegistry
 } from "../src/tools/excel/points.js";
+import { keepFreshestPointRecords } from "../src/tools/excel/shared.js";
+import { planTransfers } from "../src/tools/excel/transferByCriteria.js";
+import { parseNumber } from "../src/tools/excel/search.js";
+import excelTool from "../src/tools/excel/excelTool.js";
+import { parseTransferText } from "../src/tools/excel/transferBuilder.js";
 import { parseSheetOperations } from "../src/tools/excel/sheets.js";
 
 delete process.env.DATABASE_URL;
@@ -559,6 +573,399 @@ test("asking for condoms and lubricants narrows the same order", async () => {
 
   fs.rmSync(fileMatch[1], { force: true });
   fs.rmSync(tempDir, { recursive: true, force: true });
+});
+
+test("рабочие листы книги не становятся торговыми точками", async () => {
+  const tempDir = path.join(process.cwd(), "test", ".tmp-sheets-noise");
+  const reportFile = path.join(tempDir, "Т2 7.08-24.08.2026.xlsx");
+
+  fs.rmSync(tempDir, { recursive: true, force: true });
+  fs.mkdirSync(tempDir, { recursive: true });
+
+  const header = [
+    "Місце зберігання", "", "Начало", "Приход", "Расход",
+    "Отчет о розничных продажах", "Продажа покупателю", "Конец"
+  ];
+  const units = ["Номенклатура.Артикул", "Номенклатура.Найменування",
+    "Кількість", "Кількість", "Кількість", "Кількість", "Кількість", "Кількість"];
+  const workbook = new ExcelJS.Workbook();
+  const report = workbook.addWorksheet("TDSheet");
+
+  report.addRows([
+    header,
+    units,
+    // Строка-склад открывает блок магазина — по ней вкладка и опознаётся.
+    ["Toppers 02 Lviv Staroevreyska", "", 100, 10, 50, 45, 5, 60],
+    ["PJ-1", "Змазка pjur Original 30 мл", 10, 0, 8, 8, 0, 2],
+    // Артикул без наименования: раньше он открывал новый фантомный магазин,
+    // и всё, что ниже, уезжало на него.
+    ["SO8611", "", 1, 0, 0, 0, 0, 1],
+    ["SX-2", "Лубрикант Swiss Navy 59 мл", 5, 5, 4, 3, 1, 6]
+  ]);
+
+  // Рабочий лист человека: та же шапка, но строки-склада нет.
+  workbook.addWorksheet("40% і більше").addRows([
+    header,
+    units,
+    ["PJ-1", "Змазка pjur Original 30 мл", 10, 0, 8, 8, 0, 2]
+  ]);
+  workbook.addWorksheet("Замовлення").addRows([["PJ-1", 5]]);
+  await workbook.xlsx.writeFile(reportFile);
+
+  const agent = new Agent();
+  const answer = await agent.process(`/excel замовлення ${reportFile}`);
+  const fileMatch = answer.match(/^Excel-файл:\s*(.+\.xlsx)\s*$/m);
+
+  assert.ok(fileMatch);
+
+  const out = await new ExcelJS.Workbook().xlsx.readFile(fileMatch[1]);
+  const order = out.getWorksheet("Замовлення");
+  const skus = [];
+
+  order.eachRow((row, index) => {
+    if (index > 1) skus.push(String(row.getCell(1).value));
+  });
+
+  // Только два товара реального листа: дубль с «40% і більше» не попал,
+  // строка без наименования магазином не стала.
+  assert.deepEqual(skus.sort(), ["PJ-1", "SX-2"]);
+  assert.doesNotMatch(answer, /40% і більше/);
+
+  fs.rmSync(fileMatch[1], { force: true });
+  fs.rmSync(tempDir, { recursive: true, force: true });
+});
+
+test("перемещение: колонка нумерации, шапка и итог не портят количества", async () => {
+  const tempDir = path.join(process.cwd(), "test", ".tmp-transfer-noise");
+  const file = path.join(tempDir, "переміщення з Т11.xlsx");
+
+  fs.rmSync(tempDir, { recursive: true, force: true });
+  fs.mkdirSync(tempDir, { recursive: true });
+
+  const workbook = new ExcelJS.Workbook();
+
+  workbook.addWorksheet("на Т1").addRows([
+    ["№", "Артикул", "Кількість"],
+    ["1", "SO3206", "12"],
+    ["10", "SX0657", "7"],
+    // Числовой артикул существует и должен пережить отсев нумерации.
+    ["3", "108", "2"],
+    ["Разом", "", "21"]
+  ]);
+  await workbook.xlsx.writeFile(file);
+
+  const agent = new Agent();
+  const answer = await agent.process(`/excel перемещение ${file}`);
+  const fileMatch = answer.match(/^Excel-файл:\s*(.+\.xlsx)\s*$/m);
+
+  // 12 + 7 + 2: количество берётся справа от артикула, а не первым числом
+  // строки (иначе побеждала бы колонка «№»). Шапка и итог отброшены.
+  assert.match(answer, /Позиций всего: 3, единиц: 21/);
+  assert.ok(fileMatch);
+
+  const out = await new ExcelJS.Workbook().xlsx.readFile(fileMatch[1]);
+  const rows = [];
+
+  out.getWorksheet("Перемещение").eachRow((row, index) => {
+    if (index > 1) rows.push(row.values.slice(1, 6).map(v => (v == null ? "" : String(v))));
+  });
+
+  assert.deepEqual(rows[0], ["Т11", "Т1", "SO3206", "", "12"]);
+  assert.deepEqual(rows[2], ["Т11", "Т1", "108", "", "2"]);
+
+  fs.rmSync(fileMatch[1], { force: true });
+  fs.rmSync(tempDir, { recursive: true, force: true });
+});
+
+test("поиск и фильтр понимают кириллицу и пути с пробелами", async () => {
+  const tempDir = path.join(process.cwd(), "test", ".tmp-search-filter");
+  // Пробелы в имени — обычное дело для файлов из Telegram.
+  const reportFile = path.join(tempDir, "Т1 18.06-5.07.2026.xlsx");
+
+  fs.rmSync(tempDir, { recursive: true, force: true });
+  fs.mkdirSync(tempDir, { recursive: true });
+
+  const workbook = new ExcelJS.Workbook();
+
+  workbook.addWorksheet("TDSheet").addRows([
+    ["Місце зберігання", "", "Конец"],
+    ["Номенклатура.Артикул", "Номенклатура.Найменування", "Кількість"],
+    ["PJ10050", "Універсальна змазка pjur Original 30 мл", 3],
+    ["SO1446", "Змазка System JO H2O", 5]
+  ]);
+  await workbook.xlsx.writeFile(reportFile);
+
+  const agent = new Agent();
+  // \b в JS работает только по латинице: раньше «найди» не срезалось и
+  // бот искал в таблице фразу «найди pj10050».
+  const found = await agent.process(`/excel найди PJ10050 ${reportFile}`);
+
+  assert.match(found, /Найдено строк: 1/);
+
+  // Путь с пробелом раньше попадал внутрь искомой фразы и давал ноль строк.
+  const filtered = await agent.process(`/excel оставь только pjur ${reportFile}`);
+  const fileMatch = filtered.match(/^Excel-файл:\s*(.+\.xlsx)\s*$/m);
+
+  assert.match(filtered, /Оставил только строки/);
+  assert.ok(fileMatch);
+
+  fs.rmSync(fileMatch[1], { force: true });
+  fs.rmSync(tempDir, { recursive: true, force: true });
+});
+
+test("шаблон перемещения строит листы по известным точкам", async () => {
+  resetPointRegistry();
+  rememberPointName("Toppers 10 Chernivtsi Depo");
+  rememberPointName("Toppers 01 Lviv Gnatuka");
+  rememberPointName("ХОХО 02 Victoria Gardens");
+
+  const agent = new Agent();
+  const answer = await agent.process("шаблон перемещения с Т10");
+  const fileMatch = answer.match(/^Excel-файл:\s*(.+\.xlsx)\s*$/m);
+
+  assert.match(answer, /Шаблон перемещения с Т10 готов/);
+  assert.ok(fileMatch);
+
+  const workbook = await new ExcelJS.Workbook().xlsx.readFile(fileMatch[1]);
+  const names = workbook.worksheets.map(sheet => sheet.name);
+
+  // Лист на каждого получателя, кроме самого источника.
+  assert.deepEqual(names, ["Т10 на Т1", "Т10 на Х2"]);
+  assert.equal(workbook.worksheets[0].getCell("A1").value, "Артикул");
+  assert.equal(workbook.worksheets[0].getCell("B1").value, "Кількість");
+
+  // Заполненный шаблон должен читаться тем же разбором, что и книга,
+  // сделанная руками, — иначе круг не замыкается.
+  workbook.getWorksheet("Т10 на Т1").addRows([["SO3206", 12], ["PJ10440", 2]]);
+  await workbook.xlsx.writeFile(fileMatch[1]);
+
+  const back = await agent.process(`/excel перемещение ${fileMatch[1]}`);
+  const backFile = back.match(/^Excel-файл:\s*(.+\.xlsx)\s*$/m);
+
+  assert.match(back, /Т10 → Т1: 2 поз\., 14 шт/);
+  assert.ok(backFile);
+
+  fs.rmSync(fileMatch[1], { force: true });
+  fs.rmSync(backFile[1], { force: true });
+  resetPointRegistry();
+});
+
+test("перемещение записывается текстом сообщения", async () => {
+  resetPointRegistry();
+
+  // Разбор: маршрут строкой, позиции через запятую, количество необязательно.
+  const parsed = parseTransferText("Т10 на Т1: SO3206 12, PJ10440 2\nт10 на х2: BIO_2005");
+
+  assert.equal(parsed.length, 3);
+  assert.deepEqual(parsed[0], { from: "Т10", to: "Т1", sku: "SO3206", qty: 12 });
+  assert.deepEqual(parsed[2], { from: "Т10", to: "Х2", sku: "BIO_2005", qty: null });
+
+  const agent = new Agent();
+  const answer = await agent.process("Т10 на Т1: SO3206 12, PJ10440 2");
+  const fileMatch = answer.match(/^Excel-файл:\s*(.+\.xlsx)\s*$/m);
+
+  assert.match(answer, /Маршрутов: 1, позиций: 2, единиц: 14/);
+  assert.ok(fileMatch);
+
+  fs.rmSync(fileMatch[1], { force: true });
+  resetPointRegistry();
+});
+
+test("каждая кнопка Excel-меню доходит до Excel-инструмента", () => {
+  const ids = EXCEL_ACTIONS.map(action => action.id);
+
+  // callback_data кнопки строится из id — одинаковые id означали бы, что
+  // две кнопки делают одно и то же.
+  assert.equal(new Set(ids).size, ids.length);
+
+  for (const action of EXCEL_ACTIONS) {
+    const kinds = [action.phrase, action.hint, action.menu].filter(Boolean);
+
+    // Ровно один способ поведения: выполнить, подсказать или открыть подменю.
+    assert.equal(kinds.length, 1, `${action.id}: ${kinds.length} режим(ов)`);
+    assert.ok(action.label.length > 0);
+
+    // Фраза кнопки обязана попадать в Excel-ветку: иначе нажатие уходит в
+    // модель, и человек получает болтовню вместо отчёта.
+    if (action.phrase) {
+      assert.ok(
+        shouldUseExcelTool(action.phrase.toLowerCase()),
+        `${action.id}: фраза «${action.phrase}» не маршрутизируется в Excel`
+      );
+    }
+  }
+
+  // Условия переноса — второй уровень того же меню.
+  assert.ok(EXCEL_ACTIONS.some(action => action.menu === "criteria"));
+  assert.ok(CRITERIA_PRESETS.length > 0);
+});
+
+test("маршрут переноса задаётся списками и исключениями", () => {
+  resetPointRegistry();
+  rememberPointName("Toppers 01 Lviv Gnatuka");
+  rememberPointName("ХОХО 02 Victoria Gardens");
+
+  const query = "перенеси с Т1, Т7 и Т9 на Т10 кроме Т5 где реализация<20%";
+
+  // «на» закрывает перечисление источников: без этого Т10 попадала и туда.
+  assert.deepEqual(parseSourcePoints(query), ["Т1", "Т7", "Т9"]);
+  assert.deepEqual(parseDestinationPoints(query), ["Т10"]);
+  assert.deepEqual(parseExcludedPoints(query), ["Т5"]);
+
+  // Названия магазинов из отчёта работают наравне с кодами.
+  assert.deepEqual(
+    parseSourcePoints("перенеси с Toppers 1 на ХОХО 2 где продаж<3"),
+    ["Т1"]
+  );
+  assert.deepEqual(
+    parseDestinationPoints("перенеси с Toppers 1 на ХОХО 2 где продаж<3"),
+    ["Х2"]
+  );
+
+  resetPointRegistry();
+});
+
+test("потребность получателя закрывается один раз", () => {
+  const stock = (code, extra) => ({
+    code,
+    point: code,
+    sku: "X",
+    name: "товар",
+    retail: 0,
+    wholesale: 0,
+    end: 0,
+    available: 0,
+    expense: 0,
+    sellThrough: 0,
+    stockDays: 0,
+    need: 0,
+    ...extra
+  });
+  const bySku = new Map([
+    ["X", new Map([
+      ["Т1", stock("Т1", { end: 20, available: 20, expense: 1, sellThrough: 0.05, stockDays: 999 })],
+      ["Т2", stock("Т2", { end: 20, available: 20, expense: 1, sellThrough: 0.05, stockDays: 999 })],
+      ["Т3", stock("Т3", { retail: 4, available: 4, expense: 4, sellThrough: 1, need: 8 })]
+    ])]
+  ]);
+
+  const plan = planTransfers(bySku, {
+    sources: [],
+    destinations: [],
+    excluded: [],
+    maxStockDays: 30,
+    minBatch: 2,
+    exclusions: [],
+    isSource: item => item.sellThrough < 0.4
+  });
+  const units = plan.lines.reduce((sum, line) => sum + line.qty, 0);
+
+  // Два «мёртвых» источника не должны закрыть одну нехватку дважды:
+  // раньше получателю везли 16 при потребности 8.
+  assert.equal(units, 8);
+});
+
+test("одна точка в нескольких выгрузках считается один раз", () => {
+  const record = (file, point, sku) => ({
+    file,
+    point,
+    sku,
+    name: "товар",
+    retail: 1,
+    wholesale: 0,
+    end: 1,
+    start: 1,
+    receipt: 0,
+    expense: 1,
+    cells: {}
+  });
+
+  const dir = path.join(process.cwd(), "test", ".tmp-dup-points");
+
+  fs.rmSync(dir, { recursive: true, force: true });
+  fs.mkdirSync(dir, { recursive: true });
+
+  const older = path.join(dir, "старая.csv");
+  const newer = path.join(dir, "свежая.csv");
+
+  fs.writeFileSync(older, "a");
+  fs.writeFileSync(newer, "b");
+  // Свежесть считается по времени файла, поэтому проставляем его явно.
+  fs.utimesSync(older, new Date(2020, 0, 1), new Date(2020, 0, 1));
+  fs.utimesSync(newer, new Date(2030, 0, 1), new Date(2030, 0, 1));
+
+  const fresh = keepFreshestPointRecords(
+    [
+      record("старая.csv", "Toppers 01 Lviv Gnatuka", "A"),
+      record("свежая.csv", "Т1", "A"),
+      record("свежая.csv", "Т2", "B")
+    ],
+    [older, newer]
+  );
+
+  // «Toppers 01 Lviv Gnatuka» и «Т1» — один магазин: остаётся свежая выгрузка.
+  assert.equal(fresh.records.length, 2);
+  assert.deepEqual(fresh.records.map(item => item.sku), ["A", "B"]);
+  assert.equal(fresh.skipped.length, 1);
+  assert.equal(fresh.skipped[0].point, "Т1");
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("parseNumber не теряет числа с разделителями тысяч", () => {
+  assert.equal(parseNumber("1 234"), 1234);
+  // Раньше «1,234,567» превращалось в null — то есть в ноль в отчёте.
+  assert.equal(parseNumber("1,234,567"), 1234567);
+  // Одиночная запятая в выгрузках 1С — десятичный разделитель.
+  assert.equal(parseNumber("3,5"), 3.5);
+  assert.equal(parseNumber("1.234"), 1.234);
+});
+
+test("каждая команда из справки действительно доходит до Excel", async () => {
+  // Справка — обещание пользователю. Если пример из неё уходит не в тот
+  // модуль, человек получает не то, что просил: «найди PJ10050» без слова
+  // «таблица» бот раньше отправлял в интернет и пересказывал описание товара.
+  const documented = [
+    "заказ поставщику",
+    "заказ только презервативы и лубриканты",
+    "заказ поставщику весь товар",
+    "перенеси где реализация<20%",
+    "перенеси с Т1, Т7 и Т9 на Т10 где остаток>3",
+    "перенеси с Т1 на Т9 и Т10 кроме Т5 где запас>60",
+    "развези по продажам",
+    "перемещение по нулевым продажам",
+    "непроданное",
+    "шаблон перемещения с Т10",
+    "Т10 на Т1: SO3206 12, PJ10440 2",
+    "оставь только pjur",
+    "удали всё кроме презерватив",
+    "найди PJ10050 в таблице",
+    "аналитика по excel-файлу",
+    "покажи листы",
+    "поменяй артикул A123 на B456 в data/ostatki.xlsx"
+  ];
+
+  for (const command of documented) {
+    assert.ok(
+      shouldUseExcelTool(command.toLowerCase()),
+      `«${command}» не маршрутизируется в Excel`
+    );
+  }
+
+  const help = await excelTool.run("/excel");
+
+  // Каждая команда должна быть в справке — иначе о ней никто не узнает.
+  for (const command of documented) {
+    const head = command.split(/[<:]/)[0].trim();
+
+    assert.ok(
+      help.includes(head),
+      `«${head}» не описан в справке`
+    );
+  }
+
+  // Справка должна умещаться в одно сообщение Telegram.
+  assert.ok(help.length < 3900, `справка выросла до ${help.length} символов`);
 });
 
 test("agent explains why a T1 report produced no order", async () => {

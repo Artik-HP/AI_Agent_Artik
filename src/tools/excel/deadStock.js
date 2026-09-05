@@ -9,7 +9,9 @@ import {
 import { writeReportWorkbook } from "./writer.js";
 import {
   normalizeHeader,
+  looksLikeSectionRow,
   readSheetMatrices,
+  selectReportSheets,
   resolveProjectPath,
   sheetPointName,
   toProjectPath
@@ -80,7 +82,13 @@ const EXTRA_HEADERS = ["Точка", "Файл", "Розница за перио
  * @returns {string}
  */
 function pointFromFileName(filePath) {
-  const base = path.basename(String(filePath || ""));
+  // Telegram дописывает к имени время загрузки: «1788600000003-Т1 01.08.xlsx».
+  // Без его срезания имя не начиналось с кода точки, и точкой становилось всё
+  // имя файла целиком — в отчёте появлялся лишний «магазин»
+  // «1788600000003-Т1 01.08-05.09.2026» с копией строк настоящей Т1.
+  const base = path
+    .basename(String(filePath || ""))
+    .replace(/^\d{6,}-/, "");
   const match = base.match(/^([\p{L}]+\s*\d+)/u);
 
   return (match ? match[1] : base.replace(/\.[^.]+$/, "")).trim();
@@ -89,18 +97,16 @@ function pointFromFileName(filePath) {
 /**
  * Строка-склад: в первой колонке название точки, вторая пустая, дальше числа
  * (это подытог склада). Такие строки задают «текущую точку» для строк ниже.
+ *
+ * Правило живёт в reader.js одним экземпляром: по нему же отбираются вкладки
+ * настоящей выгрузки. Раньше здесь была своя копия, и она принимала за склад
+ * артикул с пустым наименованием — после такой строки весь остаток листа
+ * уезжал на несуществующий магазин.
  * @param {unknown[]} row
  * @returns {boolean}
  */
 export function isSectionHeader(row) {
-  const first = String(row[0] || "").trim();
-  const second = String(row[1] || "").trim();
-
-  if (!first || second || first === "Разом" || /^\d/.test(first)) {
-    return false;
-  }
-
-  return row.slice(2).some(cell => parseNumber(cell) !== null);
+  return looksLikeSectionRow(row);
 }
 
 /**
@@ -242,7 +248,7 @@ function readReportSheet(sheet, context) {
 export function readReportFile(filePath) {
   const fullPath = resolveProjectPath(filePath);
   const fileName = toProjectPath(fullPath).split("/").pop() || String(filePath);
-  const sheets = readSheetMatrices(filePath);
+  const sheets = selectReportSheets(readSheetMatrices(filePath));
   const filePoint = pointFromFileName(filePath);
   /** @type {string[]} */
   const headers = [];
