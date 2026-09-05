@@ -7,6 +7,7 @@ import { writeReportWorkbook } from "./writer.js";
 import {
   normalizeHeader,
   readSheetMatrices,
+  stripSpreadsheetPaths,
   resolveProjectPath,
   sheetPointName,
   toProjectPath
@@ -72,10 +73,14 @@ function slugify(text) {
  * @returns {string}
  */
 export function extractKeepPhrase(query) {
-  let text = String(query || "")
-    .replace(/^\s*\/excel\b/i, "")
+  // Путь вырезаем ПЕРВЫМ и общим разбором: он умеет пути с пробелами,
+  // а прежний `\S+\.xlsx` обрывался на первом пробеле и оставлял хвост
+  // пути внутри фразы. Кавычки снимаем уже после — им до этого момента
+  // ещё нужно было отделять путь от слов.
+  let text = stripSpreadsheetPaths(
+    String(query || "").replace(/^\s*\/excel\b/i, "")
+  )
     .replace(/["'«»]/g, "")
-    .replace(/\S+\.(?:csv|xls|xlsx)\b/giu, "")
     .trim();
 
   // Команду отрезаем повторно: «оставь только X» может прийти как два токена.

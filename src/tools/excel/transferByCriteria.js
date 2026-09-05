@@ -1,5 +1,6 @@
 import {
   createTimestamp,
+  keepFreshestPointRecords,
   normalizeInput,
   resolveFiles
 } from "./shared.js";
@@ -11,7 +12,10 @@ import {
   comparePointCodes,
   normalizePointCode,
   parseDestinationPoint,
+  parseDestinationPoints,
+  parseExcludedPoints,
   parseSourcePoint,
+  parseSourcePoints,
   pointName
 } from "./points.js";
 
@@ -180,7 +184,11 @@ export function resolvePeriod(files, query = "") {
   }
 
   const range = text.match(
-    /(\d{1,2})[.\-/](\d{1,2})(?:[.\-/](\d{2,4}))?\s*[-–—]\s*(\d{1,2})[.\-/](\d{1,2})(?:[.\-/](\d{2,4}))?/
+    // Разделитель дат в имени файла бывает не только дефисом: выгрузки
+    // называют и «Т7 24.07_10.08.2026_11.08» — подчёркиванием. Раньше такой
+    // период молча брался из config.yaml, и «дней запаса» считались по чужой
+    // длине периода.
+    /(\d{1,2})[.\-/](\d{1,2})(?:[.\-/](\d{2,4}))?\s*[-–—_]\s*(\d{1,2})[.\-/](\d{1,2})(?:[.\-/](\d{2,4}))?/
   );
 
   if (range) {
@@ -374,8 +382,9 @@ async function writeWorkbook(result, outDir) {
 
 /**
  * @typedef {Object} TransferPlanOptions
- * @property {string|null} source откуда везём; null — любая подходящая точка
- * @property {string|null} destination куда везём; null — кому товар нужен
+ * @property {string[]} sources откуда везём; пусто — любая подходящая точка
+ * @property {string[]} destinations куда везём; пусто — кому товар нужен
+ * @property {string[]} excluded точки, которые не трогаем ни с какой стороны
  * @property {number} maxStockDays получатель нуждается, если запаса меньше
  * @property {number} minBatch минимальная партия в строке перемещения
  * @property {RegExp[]} exclusions артикулы, которые не возим вообще
@@ -406,6 +415,13 @@ export function planTransfers(bySku, options) {
 
   for (const pointMap of bySku.values()) {
     const stocks = [...pointMap.values()];
+    // Остаток потребности по каждому получателю в пределах одного
+    // артикула. Раньше потребность читалась из stock.need заново на
+    // каждом источнике: три «мёртвых» магазина закрывали одну и ту же
+    // нехватку в 8 шт трижды, и получатель получал 24.
+    const remainingNeed = new Map(
+      stocks.map(stock => [stock.code, stock.need])
+    );
 
     stocks.forEach(stock => points.add(stock.code));
 
@@ -415,8 +431,11 @@ export function planTransfers(bySku, options) {
       continue;
     }
 
+    const allowed = stock => !options.excluded.includes(stock.code);
     const sources = stocks.filter(stock =>
-      (!options.source || stock.code === options.source) &&
+      (options.sources.length === 0 ||
+        options.sources.includes(stock.code)) &&
+      allowed(stock) &&
       stock.end > 0 &&
       options.isSource(stock)
     );
@@ -429,12 +448,16 @@ export function planTransfers(bySku, options) {
       const destinations = stocks
         .filter(stock =>
           stock.code !== from.code &&
-          (!options.destination || stock.code === options.destination) &&
+          (options.destinations.length === 0 ||
+            options.destinations.includes(stock.code)) &&
+          allowed(stock) &&
           stock.retail > 0 &&
           stock.stockDays < options.maxStockDays &&
-          stock.need > 0
+          (remainingNeed.get(stock.code) || 0) > 0
         )
-        .sort((first, second) => second.need - first.need);
+        .sort((first, second) =>
+          (remainingNeed.get(second.code) || 0) -
+          (remainingNeed.get(first.code) || 0));
 
       if (destinations.length === 0) {
         noDestination += 1;
@@ -447,7 +470,9 @@ export function planTransfers(bySku, options) {
         continue;
       }
 
-      const needs = destinations.map(stock => stock.need);
+      const needs = destinations.map(
+        stock => remainingNeed.get(stock.code) || 0
+      );
       const totalNeed = needs.reduce((sum, value) => sum + value, 0);
       // Хватает на всех — каждый получает ровно свою потребность, излишек
       // остаётся на источнике. Не хватает — делим пропорционально нужде.
@@ -465,6 +490,10 @@ export function planTransfers(bySku, options) {
         }
 
         shipped += qty;
+        remainingNeed.set(
+          target.code,
+          Math.max(0, (remainingNeed.get(target.code) || 0) - qty)
+        );
 
         lines.push({
           from: from.code,
@@ -479,7 +508,7 @@ export function planTransfers(bySku, options) {
           destStockDays: Number.isFinite(target.stockDays)
             ? Math.round(target.stockDays)
             : "",
-          destNeed: target.need,
+          destNeed: remainingNeed.get(target.code) + qty,
           fromName: pointName(from.code),
           toName: pointName(target.code)
         });
@@ -543,8 +572,14 @@ export function resolveTransferSettings() {
 export async function buildCriteriaTransfer(input) {
   const request = normalizeInput(input);
   const files = resolveFiles(request);
-  const source = parseSourcePoint(request.query);
-  const destination = parseDestinationPoint(request.query);
+  // Полный маршрут: сколько угодно источников, сколько угодно получателей и
+  // список исключений. Одиночные значения оставлены для текста ответа и для
+  // совместимости с тем, что уже читает результат.
+  const sources = parseSourcePoints(request.query);
+  const destinations = parseDestinationPoints(request.query);
+  const excluded = parseExcludedPoints(request.query);
+  const source = sources[0] || null;
+  const destination = destinations[0] || null;
   const criteria = parseCriteria(request.query);
 
   if (files.length === 0) {
@@ -601,10 +636,12 @@ export async function buildCriteriaTransfer(input) {
     records.push(...readReportFile(file).records);
   }
 
-  const bySku = groupBySkuAndPoint(records, periodDays, coverDays);
+  const fresh = keepFreshestPointRecords(records, files);
+  const bySku = groupBySkuAndPoint(fresh.records, periodDays, coverDays);
   const plan = planTransfers(bySku, {
-    source,
-    destination,
+    sources,
+    destinations,
+    excluded,
     maxStockDays,
     minBatch,
     exclusions,
@@ -612,7 +649,10 @@ export async function buildCriteriaTransfer(input) {
   });
   const lines = plan.lines;
   const points = plan.points;
-  const { matched, noDestination, excluded, leftAtSource } = plan;
+  // excluded уже занято списком точек «кроме …», поэтому счётчик исключённых
+  // артикулов берём под своим именем.
+  const { matched, noDestination, leftAtSource } = plan;
+  const excludedSkus = plan.excluded;
 
   const stats = {
     filesRead: files.length,
@@ -622,13 +662,18 @@ export async function buildCriteriaTransfer(input) {
     skus: bySku.size,
     matched,
     noDestination,
-    excluded,
+    excluded: excludedSkus,
     leftAtSource,
     coverDays,
     maxStockDays,
     minBatch,
+    // Маршрут, как его задал человек: пустые списки значат «любой».
+    sources,
+    destinations,
+    excludedPoints: excluded,
     moves: lines.length,
-    units: lines.reduce((sum, line) => sum + Number(line.qty), 0)
+    units: lines.reduce((sum, line) => sum + Number(line.qty), 0),
+    skippedFiles: fresh.skipped
   };
 
   /** @type {CriteriaMoveResult} */
@@ -686,12 +731,14 @@ export function formatCriteriaTransferResult(result) {
   }
 
   const stats = result.stats;
-  const from = result.source
-    ? `${result.source} (${pointName(result.source)})`
-    : "все точки";
-  const to = result.destination
-    ? `${result.destination} (${pointName(result.destination)})`
-    : "кому товар нужен";
+  // Маршрут показываем списком: человек мог назвать несколько складов с любой
+  // стороны, и ответ должен подтвердить именно то, что он задал.
+  const describe = (codes, fallback) => (codes && codes.length > 0
+    ? codes.map(code => `${code} (${pointName(code)})`).join(", ")
+    : fallback);
+  const from = describe(stats.sources, "все точки");
+  const to = describe(stats.destinations, "кому товар нужен");
+  const skipped = describe(stats.excludedPoints, "");
 
   return [
     "Перенос по критериям готов.",
@@ -699,6 +746,7 @@ export function formatCriteriaTransferResult(result) {
     `Условие: ${conditions}`,
     `Со склада: ${from}`,
     `На склад: ${to}`,
+    ...(skipped ? [`Не трогаю: ${skipped}`] : []),
     `Файлов: ${stats.filesRead}, складов: ${stats.points}, период: ${stats.periodDays} дн.` +
       (stats.periodSource === "config.yaml"
         ? " — период не виден в данных, взят из config.yaml. Если он другой,"
@@ -708,7 +756,15 @@ export function formatCriteriaTransferResult(result) {
     `Строк переноса: ${stats.moves}, единиц: ${stats.units}, ` +
       `осталось на источниках: ${stats.leftAtSource}`,
     `Получатель — где товар продаётся и запаса меньше ${stats.maxStockDays} дн.; ` +
-      `везём запас на ${stats.coverDays} дн. его продаж, партия от ${stats.minBatch} шт.`
+      `везём запас на ${stats.coverDays} дн. его продаж, партия от ${stats.minBatch} шт.`,
+    ...((stats.skippedFiles || []).length > 0
+      ? [
+        "Дубли выгрузок пропущены (по каждой точке считаю самую свежую): " +
+          stats.skippedFiles
+            .map(item => `${item.point} — ${item.dropped.length}`)
+            .join(", ")
+      ]
+      : [])
   ].join("\n");
 }
 

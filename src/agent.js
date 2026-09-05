@@ -106,6 +106,11 @@ export function shouldUseExcelTool(lower) {
     lower.includes("сформируй заказ поставщику") ||
     lower.includes("создай заказ поставщику") ||
     lower.includes("заказ поставщику") ||
+    // «заказ только презервативы и лубриканты» — тоже заказ, хотя слова
+    // «поставщику» в нём нет. Раньше такая фраза попадала в Excel только через
+    // LLM-роутер, то есть через раз.
+    (/зака[зж]|замовлення/i.test(lower) &&
+      /презерватив|лубрикант|змазк|смазк|весь\s+товар|категори/i.test(lower)) ||
     lower.includes("непродан") ||
     lower.includes("не продал") ||
     lower.includes("неликвид") ||
@@ -122,6 +127,9 @@ export function shouldUseExcelTool(lower) {
     /(?:реализац|реалізац|продаж|остат|залиш|запас)[\p{L}]*\s*(?:<=|>=|<|>)\s*\d/u.test(lower) ||
     lower.includes("перекинь") ||
     lower.includes("документ перемещения") ||
+    // «Т10 на Т1: SO3206 12» — перемещение текстом: слова «перемещение»
+    // в нём нет, а Excel-инструмент нужен.
+    /^\s*[\p{L}]\s*\d{1,3}\s*(?:на|->|→)\s*[\p{L}]\s*\d{1,3}\s*:/iu.test(lower) ||
     hasSheetIntent(lower) ||
     shouldEditExcel(lower) ||
     (
@@ -130,7 +138,14 @@ export function shouldUseExcelTool(lower) {
         lower.includes("csv") ||
         lower.includes("таблиц") ||
         lower.includes("остатк") ||
-        lower.includes("прайс")
+        lower.includes("прайс") ||
+        // «найди артикул PJ10050» и «поиск по книге» — тоже про таблицу, а не
+        // про интернет. Без этих слов такой запрос уходил в веб-поиск, и бот
+        // пересказывал описание товара вместо строки из файла.
+        lower.includes("артикул") ||
+        lower.includes("книге") ||
+        lower.includes("книгу") ||
+        lower.includes("выгрузк")
       ) &&
       (
         lower.includes("поставщик") ||

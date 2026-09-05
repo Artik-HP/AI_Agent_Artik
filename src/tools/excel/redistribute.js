@@ -1,10 +1,12 @@
 import {
   createTimestamp,
+  keepFreshestPointRecords,
   normalizeInput,
   resolveFiles
 } from "./shared.js";
 import { writeReportWorkbook } from "./writer.js";
 import { normalizeSkuKey, readReportFile } from "./deadStock.js";
+import { normalizePointCode, pointName } from "./points.js";
 
 /**
  * @typedef {Object} PointStock
@@ -96,11 +98,17 @@ function groupBySkuAndPoint(records) {
       bySku.set(key, points);
     }
 
-    const existing = points.get(record.point);
+    // Ключ точки — канонический код, а не текст. Одна и та же Т1 приходит
+    // и строкой-складом «Toppers 01 Lviv Gnatuka», и точкой из имени файла
+    // «Т1 18.06-5.07», и без склейки считалась бы двумя магазинами: остаток
+    // делился между ними, а в отчёт попадал маршрут «Т1 → Toppers 01».
+    // Перенос по критериям делает ровно так же (transferByCriteria.js).
+    const code = normalizePointCode(record.point) || record.point;
+    const existing = points.get(code);
 
     if (!existing) {
-      points.set(record.point, {
-        point: record.point,
+      points.set(code, {
+        point: code,
         sku: record.sku,
         name: record.name,
         retail: record.retail,
@@ -140,7 +148,9 @@ async function writeRedistributeWorkbook(result, outDir) {
       { header: "Кол-во", key: "qty", width: 9 },
       { header: "Остаток источника", key: "sourceStock", width: 17 },
       { header: "Продажи получателя", key: "destSales", width: 18 },
-      { header: "Доля получателя", key: "share", width: 15, numFmt: "0%" }
+      { header: "Доля получателя", key: "share", width: 15, numFmt: "0%" },
+      { header: "Магазин-источник", key: "fromName", width: 30 },
+      { header: "Магазин-получатель", key: "toName", width: 30 }
     ],
     rows: result.lines.map(line => ({
       from: line.from,
@@ -150,7 +160,9 @@ async function writeRedistributeWorkbook(result, outDir) {
       qty: line.qty,
       sourceStock: line.sourceStock,
       destSales: line.destSales,
-      share: line.share
+      share: line.share,
+      fromName: line.fromName,
+      toName: line.toName
     }))
   });
 }
@@ -188,7 +200,10 @@ export async function buildRedistribution(input) {
     records.push(...readReportFile(file).records);
   }
 
-  const bySku = groupBySkuAndPoint(records);
+  // Одна точка в нескольких выгрузках — это она же за другой период, а не
+  // второй магазин: суммирование задваивало её продажи и остаток.
+  const fresh = keepFreshestPointRecords(records, files);
+  const bySku = groupBySkuAndPoint(fresh.records);
   /** @type {MoveLine[]} */
   const lines = [];
   const points = new Set();
@@ -246,7 +261,9 @@ export async function buildRedistribution(input) {
           qty,
           sourceStock: source.end,
           destSales: destination.retail,
-          share: salesTotal > 0 ? destination.retail / salesTotal : 0
+          share: salesTotal > 0 ? destination.retail / salesTotal : 0,
+          fromName: pointName(source.point),
+          toName: pointName(destination.point)
         });
       });
     }

@@ -199,9 +199,17 @@ export function parseNumber(value) {
     return null;
   }
 
-  const normalized = raw.includes(",") && !raw.includes(".")
-    ? raw.replace(",", ".")
-    : raw.replace(/,/g, "");
+  // Запятая в выгрузках 1С — десятичный разделитель («3,5»), но в
+  // копипасте из других систем она же разделяет тысячи. Две и больше
+  // запятых бывают только у тысяч: «1,234,567» раньше заменял ПЕРВУЮ
+  // запятую на точку, получалось «1.234,567» и число молча становилось
+  // null — то есть нулём в отчёте.
+  const commas = (raw.match(/,/g) || []).length;
+  const normalized = commas === 0
+    ? raw.replace(/,/g, "")
+    : commas > 1 || raw.includes(".")
+      ? raw.replace(/,/g, "")
+      : raw.replace(",", ".");
   const number = Number(normalized);
 
   return Number.isFinite(number) ? number : null;
