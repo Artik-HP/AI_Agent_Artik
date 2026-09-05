@@ -1,0 +1,24 @@
+[Unit]
+Description=AI Agent Artik Telegram bot
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=ai-agent
+Group=ai-agent
+WorkingDirectory=/opt/ai-agent-artik
+Environment=NODE_ENV=production
+Environment=TZ=Europe/Kyiv
+ExecStart=/usr/bin/node /opt/ai-agent-artik/index.js --telegram
+Restart=always
+RestartSec=10
+KillSignal=SIGTERM
+TimeoutStopSec=30
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

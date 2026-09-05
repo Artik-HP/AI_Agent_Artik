@@ -89,6 +89,7 @@ npm test
 | `MODEL_ARCHITECT` | Модель для режима `architect`. Необязательно. |
 | `MODEL_ROUTER` | Зарезервирована под роутер инструментов. |
 | `TELEGRAM_BOT_TOKEN` | Токен Telegram-бота от BotFather. Нужен для `npm run telegram`. |
+| `GUIDE_FILE_PATH` | Необязательный путь к тексту `/справка`. В Windows по умолчанию `D:/telegram excel/Справка — команды Telegram Excel.txt`, на Linux — `docs/telegram-excel-guide.txt` относительно каталога проекта. |
 | `TAVILY_API_KEY` | Нужен для интернет-поиска через `/search` и похожие запросы. |
 | `YOUTUBE_API_KEY` | Нужен для поиска YouTube-видео. |
 | `OPENROUTER_STT_MODEL` | Модель распознавания речи. По умолчанию используется `openai/whisper-large-v3`. |
@@ -403,6 +404,8 @@ TELEGRAM_BOT_TOKEN=твой_telegram_bot_token
 - отправлять длинные ответы частями до 3900 символов.
 
 ## 24/7 запуск
+
+Для работы при выключенном домашнем ПК нужен отдельный сервер. Подготовка и перенос на Linux VPS описаны в [deploy/README.md](deploy/README.md).
 
 Для постоянной работы используй Telegram-режим вместе с Neon PostgreSQL:
 
