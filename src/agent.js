@@ -487,7 +487,8 @@ if (shouldUseExcelTool(lower)) {
 
   return String(await tools.excel.run({
     query: text,
-    memories
+    memories,
+    chatId: this.chatId
   }));
 }
 
@@ -646,7 +647,8 @@ const route = await chooseTool(text);
 const toolInput = route.tool === "excel"
   ? {
     query: route.input || text,
-    memories: await memory.getAll(this.chatId)
+    memories: await memory.getAll(this.chatId),
+    chatId: this.chatId
   }
   : route.input;
 const toolResult = await tool.run(toolInput);

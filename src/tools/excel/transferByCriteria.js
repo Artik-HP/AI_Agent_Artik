@@ -1,18 +1,13 @@
-import fs from "node:fs";
-import path from "node:path";
-
-import ExcelJS from "exceljs";
-
 import {
-  discoverSpreadsheetFiles,
-  existsInProject,
-  extractSpreadsheetPaths
-} from "./reader.js";
+  createTimestamp,
+  normalizeInput,
+  resolveFiles
+} from "./shared.js";
+import { writeReportWorkbook } from "./writer.js";
 import { normalizeSkuKey, readReportFile } from "./deadStock.js";
 import { allocateProportionally } from "./redistribute.js";
 import { loadSupplySettings } from "./reportGenerator.js";
 
-const OUTPUT_DIR = "exports";
 const FALLBACK_PERIOD_DAYS = 14;
 
 /**
@@ -99,61 +94,10 @@ const WORD_OPERATORS = {
 };
 
 /**
- * @param {Date} [date]
- * @returns {string}
- */
-function createTimestamp(date = new Date()) {
-  return date
-    .toISOString()
-    .replace(/[-:]/g, "")
-    .replace(/\..+$/, "")
-    .replace("T", "-");
-}
-
-/**
- * @param {unknown} input
- * @returns {{ query: string, memories: string[], files: string[], outDir: string|null }}
- */
-function normalizeInput(input) {
-  if (typeof input === "string") {
-    return { query: input, memories: [], files: [], outDir: null };
-  }
-
-  if (input && typeof input === "object") {
-    const record = /** @type {Record<string, unknown>} */ (input);
-
-    return {
-      query: String(record.query || ""),
-      memories: Array.isArray(record.memories) ? record.memories.map(String) : [],
-      files: Array.isArray(record.files) ? record.files.map(String) : [],
-      outDir: record.outDir ? String(record.outDir) : null
-    };
-  }
-
-  return { query: "", memories: [], files: [], outDir: null };
-}
-
-/**
- * @param {{ query: string, memories: string[], files: string[] }} request
- * @returns {string[]}
- */
-function resolveFiles(request) {
-  if (request.files.length > 0) {
-    return [...new Set(request.files)].filter(existsInProject);
-  }
-
-  const named = [
-    ...new Set([
-      ...extractSpreadsheetPaths(request.query),
-      ...extractSpreadsheetPaths(request.memories.join("\n"))
-    ])
-  ].filter(existsInProject);
-
-  return named.length > 0 ? named : discoverSpreadsheetFiles();
-}
-
-/**
- * «с Т5», «со склада=Т5», «из Х2» → «Т5». Без указания источник любой.
+ * «с т5», «со склада=Т5», «из x2» → «Т5» / «Х2». Без указания источник любой —
+ * это основной режим, склад пишут только когда нужно сузить до одной точки.
+ * Латинские T и X приводим к кириллице: на клавиатуре их путают постоянно,
+ * а точки в выгрузках названы кириллицей, и «t5» иначе не совпал бы ни с чем.
  * @param {string} query
  * @returns {string|null}
  */
@@ -162,7 +106,14 @@ export function parseSourcePoint(query) {
     /(?:^|\s)(?:со?|из|від|from)\s*(?:склада|складу)?\s*[:=]?\s*([\p{L}]\s*\d{1,3})(?!\d)/u
   );
 
-  return match ? match[1].replace(/\s+/g, "").toUpperCase() : null;
+  if (!match) {
+    return null;
+  }
+
+  const code = match[1].replace(/\s+/g, "").toUpperCase();
+  const latinToCyrillic = { T: "Т", X: "Х" };
+
+  return (latinToCyrillic[code[0]] || code[0]) + code.slice(1);
 }
 
 /**
@@ -333,46 +284,23 @@ export function formatCriterion(criterion) {
  * @returns {Promise<string>}
  */
 async function writeWorkbook(result, outDir) {
-  const dir = outDir ? path.resolve(outDir) : path.resolve(process.cwd(), OUTPUT_DIR);
-
-  fs.mkdirSync(dir, { recursive: true });
-
-  const filePath = path.join(dir, `perenos-po-kriteriyam-${createTimestamp()}.xlsx`);
-  const workbook = new ExcelJS.Workbook();
-
-  workbook.creator = "AI_Agent_Artik";
-  workbook.created = new Date();
-
-  const worksheet = workbook.addWorksheet("Перенос");
-
-  worksheet.columns = [
-    { header: "Со склада", key: "from", width: 12 },
-    { header: "На склад", key: "to", width: 12 },
-    { header: "Артикул", key: "sku", width: 18 },
-    { header: "Название", key: "name", width: 44 },
-    { header: "Кол-во", key: "qty", width: 10 },
-    { header: "Реализация источника", key: "sellThrough", width: 20 },
-    { header: "Остаток источника", key: "sourceStock", width: 18 },
-    { header: "Продажи получателя", key: "destSales", width: 18 },
-    { header: "Доля", key: "share", width: 10 }
-  ];
-
-  for (const line of result.lines) {
-    worksheet.addRow(line);
-  }
-
-  worksheet.getColumn("sellThrough").numFmt = "0%";
-  worksheet.getColumn("share").numFmt = "0%";
-  worksheet.getRow(1).font = { bold: true };
-  worksheet.views = [{ state: "frozen", ySplit: 1 }];
-  worksheet.autoFilter = {
-    from: { row: 1, column: 1 },
-    to: { row: 1, column: worksheet.columnCount }
-  };
-
-  await workbook.xlsx.writeFile(filePath);
-
-  return filePath;
+  return await writeReportWorkbook({
+    fileName: `perenos-po-kriteriyam-${createTimestamp()}`,
+    sheetName: "Перенос",
+    outDir,
+    columns: [
+      { header: "Со склада", key: "from", width: 12 },
+      { header: "На склад", key: "to", width: 12 },
+      { header: "Артикул", key: "sku", width: 18 },
+      { header: "Название", key: "name", width: 44 },
+      { header: "Кол-во", key: "qty", width: 10 },
+      { header: "Реализация источника", key: "sellThrough", width: 20, numFmt: "0%" },
+      { header: "Остаток источника", key: "sourceStock", width: 18 },
+      { header: "Продажи получателя", key: "destSales", width: 18 },
+      { header: "Доля", key: "share", width: 10, numFmt: "0%" }
+    ],
+    rows: result.lines
+  });
 }
 
 /**
@@ -569,7 +497,7 @@ export function formatCriteriaTransferResult(result) {
     "Перенос по критериям готов.",
     `Excel-файл: ${result.outputPath}`,
     `Условие: ${conditions}`,
-    `Со склада: ${result.source || "любого подходящего"}`,
+    `Со склада: ${result.source || "все точки"}`,
     `Файлов: ${stats.filesRead}, складов: ${stats.points}, период: ${stats.periodDays} дн.`,
     `Позиций подошло: ${stats.matched}, некуда везти: ${stats.noDestination}`,
     `Строк переноса: ${stats.moves}, единиц: ${stats.units}`,

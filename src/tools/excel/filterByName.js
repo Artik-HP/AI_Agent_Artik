@@ -1,20 +1,16 @@
-import fs from "node:fs";
-import path from "node:path";
-
-import ExcelJS from "exceljs";
-
 import {
-  discoverSpreadsheetFiles,
-  existsInProject,
-  extractSpreadsheetPaths,
+  createTimestamp,
+  normalizeInput,
+  resolveFiles
+} from "./shared.js";
+import { writeReportWorkbook } from "./writer.js";
+import {
   normalizeHeader,
   readSheetMatrices,
   resolveProjectPath,
   sheetPointName,
   toProjectPath
 } from "./reader.js";
-
-const OUTPUT_DIR = "exports";
 
 /**
  * Тексты, по которым ищем колонку с названием товара. Заголовок «съезжает»
@@ -60,18 +56,6 @@ const COMMAND_PREFIXES = new RegExp(
  */
 
 /**
- * @param {Date} [date]
- * @returns {string}
- */
-function createTimestamp(date = new Date()) {
-  return date
-    .toISOString()
-    .replace(/[-:]/g, "")
-    .replace(/\..+$/, "")
-    .replace("T", "-");
-}
-
-/**
  * @param {string} text
  * @returns {string}
  */
@@ -103,48 +87,6 @@ export function extractKeepPhrase(query) {
     .replace(/\b(?:в|из|со|с)\s+файл\w*/gi, "")
     .replace(/\s+/g, " ")
     .trim();
-}
-
-/**
- * @param {unknown} input
- * @returns {{ query: string, memories: string[], files: string[], outDir: string|null }}
- */
-function normalizeInput(input) {
-  if (typeof input === "string") {
-    return { query: input, memories: [], files: [], outDir: null };
-  }
-
-  if (input && typeof input === "object") {
-    const record = /** @type {Record<string, unknown>} */ (input);
-
-    return {
-      query: String(record.query || ""),
-      memories: Array.isArray(record.memories) ? record.memories.map(String) : [],
-      files: Array.isArray(record.files) ? record.files.map(String) : [],
-      outDir: record.outDir ? String(record.outDir) : null
-    };
-  }
-
-  return { query: "", memories: [], files: [], outDir: null };
-}
-
-/**
- * @param {{ query: string, memories: string[], files: string[] }} request
- * @returns {string[]}
- */
-function resolveFiles(request) {
-  if (request.files.length > 0) {
-    return [...new Set(request.files)].filter(existsInProject);
-  }
-
-  const named = [
-    ...new Set([
-      ...extractSpreadsheetPaths(request.query),
-      ...extractSpreadsheetPaths(request.memories.join("\n"))
-    ])
-  ].filter(existsInProject);
-
-  return named.length > 0 ? named : discoverSpreadsheetFiles();
 }
 
 /**
@@ -233,25 +175,12 @@ function readSheets(filePath) {
 
 /**
  * @param {FilterResult} result
- * @param {{ file: string, headers: string[], nameIndex: number }[]} sources
+ * @param {{ headers: string[] }[]} sources
  * @param {{ file: string, cells: Record<string, string> }[]} kept
  * @param {string|null} outDir
  * @returns {Promise<string>}
  */
 async function writeFilteredWorkbook(result, sources, kept, outDir) {
-  const dir = outDir ? path.resolve(outDir) : path.resolve(process.cwd(), OUTPUT_DIR);
-  fs.mkdirSync(dir, { recursive: true });
-
-  const filePath = path.join(
-    dir,
-    `filter-${slugify(result.phrase)}-${createTimestamp()}.xlsx`
-  );
-  const workbook = new ExcelJS.Workbook();
-
-  workbook.creator = "AI_Agent_Artik";
-  workbook.created = new Date();
-
-  const worksheet = workbook.addWorksheet("Отфильтровано");
   const union = [];
   const seen = new Set();
 
@@ -266,34 +195,27 @@ async function writeFilteredWorkbook(result, sources, kept, outDir) {
     }
   }
 
-  const columns = sources.length > 1 ? ["Файл", ...union] : union;
-  worksheet.columns = columns.map(header => ({
-    header,
-    key: header,
-    width: header.length > 24 ? 40 : 16
-  }));
+  const headers = sources.length > 1 ? ["Файл", ...union] : union;
 
-  for (const entry of kept) {
-    /** @type {Record<string, unknown>} */
-    const row = sources.length > 1 ? { "Файл": entry.file } : {};
+  return await writeReportWorkbook({
+    fileName: `filter-${slugify(result.phrase)}-${createTimestamp()}`,
+    sheetName: "Отфильтровано",
+    outDir,
+    columns: headers.map(header => ({
+      header,
+      width: header.length > 24 ? 40 : 16
+    })),
+    rows: kept.map(entry => {
+      /** @type {Record<string, unknown>} */
+      const row = sources.length > 1 ? { "Файл": entry.file } : {};
 
-    for (const header of union) {
-      row[header] = entry.cells[header] ?? "";
-    }
+      for (const header of union) {
+        row[header] = entry.cells[header] ?? "";
+      }
 
-    worksheet.addRow(row);
-  }
-
-  worksheet.getRow(1).font = { bold: true };
-  worksheet.views = [{ state: "frozen", ySplit: 1 }];
-  worksheet.autoFilter = {
-    from: { row: 1, column: 1 },
-    to: { row: 1, column: columns.length }
-  };
-
-  await workbook.xlsx.writeFile(filePath);
-
-  return filePath;
+      return row;
+    })
+  });
 }
 
 /**

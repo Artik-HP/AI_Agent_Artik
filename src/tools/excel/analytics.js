@@ -42,20 +42,6 @@ export function summarizeWorkbooks(workbooks) {
  * @param {{ row: Record<string, string> }[]} rows
  * @returns {number}
  */
-export function totalPrice(rows) {
-  return rows.reduce((sum, item) => {
-    const price = parseNumber(getCell(item.row, COLUMN_ALIASES.price));
-    const quantity =
-      parseNumber(getCell(item.row, COLUMN_ALIASES.stock)) || 1;
-
-    return sum + (price || 0) * quantity;
-  }, 0);
-}
-
-/**
- * @param {{ row: Record<string, string> }[]} rows
- * @returns {number}
- */
 export function averagePrice(rows) {
   const prices = rows
     .map(item => parseNumber(getCell(item.row, COLUMN_ALIASES.price)))
@@ -66,57 +52,6 @@ export function averagePrice(rows) {
   }
 
   return prices.reduce((sum, price) => sum + price, 0) / prices.length;
-}
-
-/**
- * @param {{ row: Record<string, string> }[]} rows
- * @param {"asc"|"desc"} direction
- * @returns {{ row: Record<string, string>, price: number }|null}
- */
-function extremePrice(rows, direction) {
-  const pricedRows = rows.reduce((result, item) => {
-    const price = parseNumber(getCell(item.row, COLUMN_ALIASES.price));
-
-    if (price !== null) {
-      result.push({ row: item.row, price });
-    }
-
-    return result;
-  }, /** @type {{ row: Record<string, string>, price: number }[]} */ ([]));
-
-  if (pricedRows.length === 0) {
-    return null;
-  }
-
-  return pricedRows.sort((first, second) =>
-    direction === "asc"
-      ? first.price - second.price
-      : second.price - first.price
-  )[0];
-}
-
-/**
- * @param {{ row: Record<string, string> }[]} rows
- * @returns {{ row: Record<string, string>, price: number }|null}
- */
-export function mostExpensive(rows) {
-  return extremePrice(rows, "desc");
-}
-
-/**
- * @param {{ row: Record<string, string> }[]} rows
- * @returns {{ row: Record<string, string>, price: number }|null}
- */
-export function cheapest(rows) {
-  return extremePrice(rows, "asc");
-}
-
-/**
- * @param {{ row: Record<string, string> }[]} rows
- * @returns {number}
- */
-export function countProducts(rows) {
-  return rows.length;
 }
 
 /**
