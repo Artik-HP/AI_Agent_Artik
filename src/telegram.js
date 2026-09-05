@@ -14,7 +14,11 @@ import { logError, logInfo } from "./utils/logger.js";
 import { describeRunningCode } from "./version.js";
 
 const agents = new Map();
-const GUIDE_FILE_PATH = "D:/telegram excel/Справка — команды Telegram Excel.txt";
+const GUIDE_FILE_PATH = process.env.GUIDE_FILE_PATH || (
+  process.platform === "win32"
+    ? "D:/telegram excel/Справка — команды Telegram Excel.txt"
+    : path.resolve("docs", "telegram-excel-guide.txt")
+);
 const SPREADSHEET_EXTENSIONS = new Set([
   ".csv",
   ".xls",
