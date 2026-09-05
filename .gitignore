@@ -25,3 +25,11 @@ dist/
 build/
 
 memory.json
+# бэкапы пула файлов (Excel пользователя, не код)
+backup/
+
+# выгрузки, которые бот сформировал сам
+exports/
+
+# файлы, присланные в Telegram
+data/telegram/

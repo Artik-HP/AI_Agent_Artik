@@ -11,6 +11,15 @@ const DEFAULT_SUPPLY_SETTINGS = {
   sku_prefixes: ["PJ", "SX", "SO", "FM", "AD", "MD", "AL"]
 };
 
+// Правила переноса товара между магазинами. Отдельно от снабжения: там речь
+// про закупку у поставщика, здесь — про то, что уже лежит в сети.
+const DEFAULT_TRANSFER_SETTINGS = {
+  cover_days: 36,
+  max_stock_days: 30,
+  min_batch: 2,
+  exclude_sku_patterns: ["^p\\d+$"]
+};
+
 /**
  * Лениво читает supply_settings из config.yaml.
  * Ошибка чтения/парсинга не роняет импорт модуля — возвращаются дефолты.
@@ -29,4 +38,21 @@ export function loadSupplySettings() {
     return { ...DEFAULT_SUPPLY_SETTINGS };
   }
 }
-
+
+/**
+ * Лениво читает transfer_settings из config.yaml.
+ * @returns {{ cover_days: number, max_stock_days: number, min_batch: number, exclude_sku_patterns: string[] }}
+ */
+export function loadTransferSettings() {
+  try {
+    const configPath = path.resolve(process.cwd(), 'config.yaml');
+    const parsed = YAML.parse(fs.readFileSync(configPath, 'utf8'));
+
+    return {
+      ...DEFAULT_TRANSFER_SETTINGS,
+      ...(parsed && parsed.transfer_settings ? parsed.transfer_settings : {})
+    };
+  } catch {
+    return { ...DEFAULT_TRANSFER_SETTINGS };
+  }
+}

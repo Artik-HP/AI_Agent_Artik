@@ -8,6 +8,10 @@ import { startTelegramBot } from "./src/telegram.js";
 import {
   initDatabase
 } from "./src/database.js";
+import { installCrashHandlers, logError, logInfo } from "./src/utils/logger.js";
+
+// Ставим до всего остального: падение на старте тоже должно оставить след.
+installCrashHandlers();
 
 /**
  * @typedef {Object} ErrorResponse
@@ -59,6 +63,7 @@ async function main() {
 
 async function runTelegramBot() {
   await startTelegramBot();
+  logInfo("Бот работает, ждём сообщения.");
   process.stdin.resume();
 }
 
@@ -116,6 +121,6 @@ async function runCli() {
  */
 
 main().catch(error => {
-  console.error(`Ошибка запуска: ${getErrorMessage(error)}`);
+  logError("Ошибка запуска:", error);
   process.exitCode = 1;
 });

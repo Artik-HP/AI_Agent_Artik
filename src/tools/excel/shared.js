@@ -76,17 +76,28 @@ export function normalizeInput(input) {
 export function looksLikeGeneratedReport(filePath) {
   const fileName = path.basename(String(filePath || "")).toLowerCase();
 
-  // Замовлення поставщику — исторический список, был в salesOrder.js.
-  const orderMarkers = [
-    "замовлення",
-    "заказ",
-    "order",
-    "purchase"
+  // Имена, под которыми бот сохраняет свои книги в exports/ — все латиницей,
+  // см. fileName в вызовах writeReportWorkbook. Список важен для замовлення:
+  // оно добирает выгрузки чата под лист «Переміщення», и вернувшийся в чат
+  // отчёт бота выглядел бы там ещё одним магазином.
+  //
+  // Кириллических слов здесь намеренно нет. «Замовлення» и «заказ» стояли тут
+  // с тех пор, когда список жил в salesOrder.js, и отсекали живые выгрузки:
+  // человек называет свои файлы «замовлення 22.07 Т3 (4.07-21.07.2026).xlsx»,
+  // и бот их молча не видел.
+  const generatedMarkers = [
+    "sales-order",
+    "purchase-order",
+    "neprodano",
+    "perenos-po-kriteriyam",
+    "peremeshchenie",
+    "razvezti",
+    "filter-",
+    "sheets-",
+    "analiz-"
   ];
 
-  // TODO(human): дополнить признаками остальных выходных книг бота
-
-  return orderMarkers.some(marker => fileName.includes(marker));
+  return generatedMarkers.some(marker => fileName.includes(marker));
 }
 
 /**

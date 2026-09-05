@@ -34,6 +34,11 @@ import {
   buildCriteriaTransfer,
   formatCriteriaTransferResult
 } from "./transferByCriteria.js";
+import {
+  formatSheetsResult,
+  hasSheetIntent,
+  manageSheets
+} from "./sheets.js";
 import { searchRows } from "./search.js";
 import { runEdit } from "./editor.js";
 import { discoverChatFiles } from "./shared.js";
@@ -43,10 +48,17 @@ const HELP_TEXT = [
   "",
   "Команды:",
   "/excel заказ остатки=data/ostatki.xlsx прайс=data/price.xlsx",
-  "/excel замовлення data/t1.xlsx",
+  "/excel замовлення data/t1.xlsx data/t2.xlsx",
+  "   — заказ по всему товару. Что не попало в заказ, уходит на лист",
+  "     «Переміщення» того же файла: с магазина, где не продаётся,",
+  "     в магазин, где продаётся.",
+  "/excel замовлення только презервативы и лубриканты data/t1.xlsx",
+  "   — тот же заказ, суженный до закупаемых категорий (кнопка 🧴 в Telegram).",
   "/excel непроданное data/t1.xlsx data/t2.xlsx data/x1.xlsx",
   "/excel перемещение по нулевым продажам data/t1.xlsx data/t2.xlsx",
   "/excel перенеси где реализация<20%",
+  "/excel покажи листы data/t1.xlsx",
+  "/excel создай лист Т9 / удали лист Т5 / переименуй лист Т5 в Т9",
   "/excel оставь только pjur data/t1.xlsx",
   "/excel аналитика data/ostatki.xlsx data/price.xlsx",
   "/excel поиск товар data/ostatki.xlsx",
@@ -289,6 +301,18 @@ export async function runExcelTool(input) {
 
   if (!query || lower === "help" || lower === "помощь") {
     return HELP_TEXT;
+  }
+
+  // Листы проверяем раньше правки ячеек: «удали лист Т5» — про структуру
+  // книги, а не про её содержимое.
+  if (hasSheetIntent(query)) {
+    const result = await manageSheets({
+      query,
+      memories: request.memories,
+      chatId: request.chatId
+    });
+
+    return formatSheetsResult(result);
   }
 
   if (shouldEditExcel(lower)) {
