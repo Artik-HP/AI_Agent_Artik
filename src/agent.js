@@ -11,7 +11,9 @@ import { tools, listTools } from "./tools/index.js";// tools — модуль и
 import { chooseTool } from "./routerAgent.js";
 import * as memory from "./memory.js";
 import { askModel } from "./model.js";
+import { describeRunningCode } from "./version.js";
 import { getDatabaseStatus } from "./database.js";
+import { hasSheetIntent } from "./tools/excel/sheets.js";
 const MODELS = {
   default: process.env.MODEL_DEFAULT,
   coder: process.env.MODEL_CODER,
@@ -120,6 +122,7 @@ export function shouldUseExcelTool(lower) {
     /(?:реализац|реалізац|продаж|остат|залиш|запас)[\p{L}]*\s*(?:<=|>=|<|>)\s*\d/u.test(lower) ||
     lower.includes("перекинь") ||
     lower.includes("документ перемещения") ||
+    hasSheetIntent(lower) ||
     shouldEditExcel(lower) ||
     (
       (
@@ -446,7 +449,8 @@ if (lower === "/random") {
   return [
     `Chat ID: ${this.chatId}`,
     `Память: ${memories.length}`,
-    `История: ${this.conversationHistory.length}`
+    `История: ${this.conversationHistory.length}`,
+    `Код: ${describeRunningCode()}`
   ].join("\n");
 }
 

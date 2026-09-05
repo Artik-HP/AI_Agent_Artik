@@ -10,6 +10,8 @@ import {
 } from "./tools/speech.js";
 import { splitMessage }
   from "./utils/splitMessage.js";
+import { logError, logInfo } from "./utils/logger.js";
+import { describeRunningCode } from "./version.js";
 
 const agents = new Map();
 const SPREADSHEET_EXTENSIONS = new Set([
@@ -22,6 +24,15 @@ const SPREADSHEET_EXTENSIONS = new Set([
 const SUPPLIER_ORDER_ACTION = "supplier_order";
 /** Фраза, которую понимает agent.process как запрос на замовлення Т1. */
 const SUPPLIER_ORDER_PHRASE = "Подготовь заказ поставщику.";
+
+/** callback_data кнопки «Заказ: презервативы + лубриканты». */
+const SUPPLIER_ORDER_CATEGORIES_ACTION = "supplier_order_categories";
+/**
+ * Та же команда заказа, но суженная до закупаемых категорий. Признак сужения
+ * для salesOrder — название категории в тексте, поэтому фраза их называет.
+ */
+const SUPPLIER_ORDER_CATEGORIES_PHRASE =
+  "Подготовь заказ поставщику только по презервативам и лубрикантам.";
 
 /** callback_data кнопки «Непроданное» под сообщением о загрузке файла. */
 const DEAD_STOCK_ACTION = "dead_stock";
@@ -250,6 +261,21 @@ export function sanitizeFileName(value) {
 }
 
 /**
+ * Обрыв связи, который лечится повтором, а не разбором причины.
+ * @param {unknown} error
+ * @returns {boolean}
+ */
+function isTransientNetworkError(error) {
+  const code = error && typeof error === "object"
+    ? String(/** @type {{ code?: unknown }} */ (error).code || "")
+    : "";
+  const message = error instanceof Error ? error.message : String(error);
+
+  return /ECONNRESET|ETIMEDOUT|EAI_AGAIN|ENOTFOUND|socket hang up/i
+    .test(`${code} ${message}`);
+}
+
+/**
  * @param {import("telegraf").Context} ctx
  * @param {string} answer
  */
@@ -257,20 +283,32 @@ async function replyAgentAnswer(ctx, answer) {
   const documentReply = getDocumentReply(answer);
 
   if (documentReply) {
-    try {
-      await ctx.replyWithDocument(
-        {
-          source: documentReply.filePath,
-          filename: documentReply.fileName
-        },
-        {
-          caption: documentReply.caption,
-          ...MAIN_KEYBOARD
+    // Один повтор на обрыв связи. Telegram рвёт соединение на середине
+    // загрузки книги (ECONNRESET, socket hang up) — это дрожание канала, а не
+    // испорченный файл, и вторая попытка обычно проходит. Без повтора человек
+    // вместо книги получал текст с путём к файлу внутри сервера.
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      try {
+        await ctx.replyWithDocument(
+          {
+            source: documentReply.filePath,
+            filename: documentReply.fileName
+          },
+          {
+            caption: documentReply.caption,
+            ...MAIN_KEYBOARD
+          }
+        );
+        return;
+      } catch (error) {
+        logError(`Не отправился документ (попытка ${attempt}):`, error);
+
+        if (attempt === 2 || !isTransientNetworkError(error)) {
+          break;
         }
-      );
-      return;
-    } catch (error) {
-      console.error("Telegram document reply error:", error);
+
+        await new Promise(resolve => setTimeout(resolve, 1500));
+      }
     }
   }
 
@@ -432,6 +470,10 @@ async function handleDocumentMessage(ctx) {
       ].join("\n"),
       Markup.inlineKeyboard([
         [Markup.button.callback("📦 Заказ поставщику", SUPPLIER_ORDER_ACTION)],
+        [Markup.button.callback(
+          "🧴 Заказ: презервативы + лубриканты",
+          SUPPLIER_ORDER_CATEGORIES_ACTION
+        )],
         [Markup.button.callback("🗂 Непроданное", DEAD_STOCK_ACTION)],
         [Markup.button.callback("♻️ Развезти по продажам", REDISTRIBUTE_ACTION)],
         [Markup.button.callback("🎯 Перенос по условию", CRITERIA_MENU_ACTION)],
@@ -455,6 +497,26 @@ async function handleSupplierOrderAction(ctx) {
 
     const agent = getAgent(chatId);
     const answer = await agent.process(SUPPLIER_ORDER_PHRASE);
+
+    await replyAgentAnswer(ctx, answer);
+  } catch (error) {
+    await handleTelegramError(ctx, error);
+  }
+}
+
+/**
+ * Кнопка «Заказ: презервативы + лубриканты» — тот же заказ, суженный до
+ * закупаемых категорий.
+ * @param {import("telegraf").Context} ctx
+ */
+async function handleSupplierOrderCategoriesAction(ctx) {
+  const chatId = ctx.chat?.id;
+
+  try {
+    await ctx.answerCbQuery("Готовлю заказ по категориям...");
+
+    const agent = getAgent(chatId);
+    const answer = await agent.process(SUPPLIER_ORDER_CATEGORIES_PHRASE);
 
     await replyAgentAnswer(ctx, answer);
   } catch (error) {
@@ -514,11 +576,15 @@ async function handleCriteriaMenuAction(ctx) {
       [
         "По какому условию вывозить товар?",
         "",
-        "Считаю по всем точкам сразу. Позиция вывозится целиком, объём делится",
-        "между точками, где она продаётся.",
+        "Считаю по всем точкам сразу. Товар едет туда, где он продаётся и",
+        "скоро кончится; везу столько, сколько получателю нужно, остальное",
+        "остаётся на месте.",
         "",
         "Свой порог — текстом: «перенеси где реализация<15%».",
-        "Если нужен один магазин — допиши его: «перенеси с Т5 где реализация<15%»."
+        "Один магазин-источник: «перенеси с Т5 где реализация<15%»",
+        "(понимаю и «с toppers 1», и «с т1»).",
+        "Конкретный получатель: «перенеси с т1 на т9 где остаток>3».",
+        "Если период не виден в имени файла — допиши «период=30»."
       ].join("\n"),
       Markup.inlineKeyboard(
         CRITERIA_PRESETS.map(preset => [
@@ -584,13 +650,19 @@ async function handleTransferAction(ctx) {
  * @param {unknown} error
  */
 async function handleTelegramError(ctx, error) {
-  console.error("Telegram handler error:", error);
+  logError("Ошибка обработчика Telegram:", error);
 
   const message = error instanceof Error ? error.message : String(error);
 
-  await ctx.reply(
-    "Ошибка: " + message
-  );
+  // Раньше здесь был голый ctx.reply. Текст ошибки бывает длиннее лимита
+  // Telegram (4096 символов) — например, со стеком ExcelJS или списком путей;
+  // reply падал внутри catch, reject уходил наверх необработанным и убивал
+  // процесс. Бот исчезал молча ровно в тот момент, когда что-то сломалось.
+  try {
+    await ctx.reply(splitMessage(`Ошибка: ${message}`, 3900)[0]);
+  } catch (replyError) {
+    logError("Не смог отправить сообщение об ошибке:", replyError);
+  }
 }
 
 /**
@@ -642,6 +714,10 @@ export async function startTelegramBot() {
   });
 
   bot.action(SUPPLIER_ORDER_ACTION, handleSupplierOrderAction);
+  bot.action(
+    SUPPLIER_ORDER_CATEGORIES_ACTION,
+    handleSupplierOrderCategoriesAction
+  );
   bot.action(DEAD_STOCK_ACTION, handleDeadStockAction);
   bot.action(REDISTRIBUTE_ACTION, handleRedistributeAction);
   bot.action(CRITERIA_MENU_ACTION, handleCriteriaMenuAction);
@@ -652,18 +728,33 @@ export async function startTelegramBot() {
   bot.on("audio", handleSpeechMessage);
   bot.on("document", handleDocumentMessage);
 
+  // Последний рубеж: всё, что просочилось мимо try/catch обработчиков.
+  // Без него Telegraf пробрасывает ошибку дальше, она становится
+  // необработанным reject-ом — то есть смертью процесса.
+  bot.catch((error, ctx) => {
+    logError(`Необработанная ошибка Telegraf (${ctx.updateType}):`, error);
+  });
+
   await registerBotCommands(bot);
 
-  console.log("TOKEN:", token ? "есть" : "нет");
-  console.log("1. Создаем Telegraf");
-  console.log("2. Регистрируем обработчики");
-  console.log("3. Перед launch");
+  // bot.launch() в Telegraf 4 резолвится только когда бота остановили, поэтому
+  // его НЕ ждём: иначе startTelegramBot никогда не возвращается, а строка
+  // «бот запущен» никогда не печатается — что и происходило.
+  bot.launch().catch(error => {
+    // 409 значит, что тот же токен уже кто-то опрашивает: обычно это второй,
+    // забытый экземпляр бота. Пока их двое, Telegram отдаёт сообщения то
+    // одному, то другому, и бот отвечает по-разному на одну и ту же кнопку.
+    if (String(error?.message || "").includes("409")) {
+      logError(
+        "Бот уже запущен где-то ещё (409 Conflict). Останови лишний экземпляр:" +
+        " pm2 delete ai-agent-artik или закрой второе окно с npm run telegram."
+      );
+    } else {
+      logError("Telegram polling упал:", error);
+    }
 
-await bot.launch();
+    process.exitCode = 1;
+  });
 
-console.log("4. После launch");
-  
-console.log(
-    "Telegram bot started"
-  );
+  logInfo(`Telegram bot started. Код: ${describeRunningCode()}`);
 }

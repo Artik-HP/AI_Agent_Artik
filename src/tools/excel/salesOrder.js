@@ -21,14 +21,35 @@ import {
 } from "./reader.js";
 import { parseNumber } from "./search.js";
 import { loadSupplySettings } from "./reportGenerator.js";
+import {
+  classifyOrderCategory,
+  mentionsOrderCategory,
+  orderCategoryTitles
+} from "./categories.js";
+import {
+  isSectionHeader,
+  normalizeSkuKey,
+  readReportFile
+} from "./deadStock.js";
+import {
+  buildPointMetrics,
+  planTransfers,
+  resolvePeriod,
+  resolveTransferSettings
+} from "./transferByCriteria.js";
+import { rememberPointName } from "./points.js";
 
 const DEFAULT_MAX_STOCK_DAYS = 45;
 const DEFAULT_TARGET_PERIODS = 2;
 
 /**
- * Префиксы артикулов, которые рассматриваем для заказа. Значение по умолчанию —
- * из config.yaml (supply_settings.sku_prefixes); этот массив используется, если
- * конфиг недоступен. Порядок = приоритет сортировки строк в готовом файле.
+ * Префиксы артикулов = БРЕНДЫ (pjur, System JO, Noir Handmade), а не категории,
+ * поэтому фильтром заказа они больше не работают: презервативы и лубриканты
+ * рассыпаны по всем префиксам и по «голым» цифровым артикулам. Осталось два
+ * применения: порядок сортировки строк в готовом файле и явное сужение из
+ * запроса («замовлення prefixes=SO,PR»). Значение по умолчанию — из config.yaml
+ * (supply_settings.sku_prefixes); этот массив используется, если конфиг
+ * недоступен.
  */
 const DEFAULT_SKU_PREFIXES = [
   "PJ",
@@ -81,6 +102,8 @@ const FILL_COLORS = {
  * @property {string} [point] точка (имя вкладки), "" если вкладка одна
  * @property {string} sku
  * @property {string} name
+ * @property {string} category закупаемая категория: «Презервативи», «Лубриканти»
+ *   или "" — товар не из закупаемых категорий
  * @property {number|null} start
  * @property {number|null} receipt
  * @property {number|null} available
@@ -98,7 +121,10 @@ const FILL_COLORS = {
  * @typedef {Object} SalesOrderOptions
  * @property {number} maxStockDays
  * @property {number} targetPeriods
- * @property {string[]} skuPrefixes
+ * @property {string[]} skuPrefixes порядок сортировки строк, не фильтр
+ * @property {string[]|null} prefixFilter сужение из запроса «prefixes=SO,PR»
+ * @property {string[]} categories названия закупаемых категорий
+ * @property {boolean} categoriesOnly сузить ли заказ до этих категорий
  * @property {number} periodDays
  * @property {number} minSellThrough доля Расход/(Начало+Приход), ниже которой не заказываем
  */
@@ -106,6 +132,8 @@ const FILL_COLORS = {
 /**
  * @typedef {Object} SalesOrderStats
  * @property {number} productRows строк с артикулом и наименованием
+ * @property {number} categoryMatched прошло фильтр категорий (== productRows,
+ *   когда сужения не просили)
  * @property {number} prefixMatched из них с нужным префиксом артикула
  * @property {number} withSales из них с расходом больше нуля
  * @property {number} lowSellThrough отброшено: реализация ниже порога minSellThrough
@@ -119,6 +147,7 @@ const FILL_COLORS = {
  * @property {string|null} outputPath
  * @property {SalesOrderOptions} options
  * @property {SalesOrderLine[]} lines
+ * @property {{ lines: Object[], stats: Object, error?: string }} [transfer] лист «Переміщення»
  * @property {{ lines: number, recommendedTotal: number }} summary
  * @property {SalesOrderStats} [stats]
  * @property {string[]} notes
@@ -194,8 +223,10 @@ function configuredSkuPrefixes() {
 }
 
 /**
+ * Префиксы, названные в запросе явно: «замовлення prefixes=SO,PR». Только они
+ * сужают заказ — сам по себе префикс категорию не задаёт.
  * @param {string} query
- * @returns {string[]}
+ * @returns {string[]|null} null — сужения не просили
  */
 function extractSkuPrefixes(query) {
   const match = query.match(
@@ -203,7 +234,7 @@ function extractSkuPrefixes(query) {
   );
 
   if (!match) {
-    return configuredSkuPrefixes();
+    return null;
   }
 
   const prefixes = match[1]
@@ -211,7 +242,33 @@ function extractSkuPrefixes(query) {
     .map(prefix => prefix.trim().toUpperCase())
     .filter(Boolean);
 
-  return prefixes.length > 0 ? prefixes : configuredSkuPrefixes();
+  return prefixes.length > 0 ? prefixes : null;
+}
+
+/**
+ * Ограничить ли заказ закупаемыми категориями (презервативы, лубриканты).
+ * По умолчанию заказ собирается по ЛЮБОМУ товару — сужение включается только
+ * по просьбе: «заказ только презервативы и лубриканты», кнопка в Telegram или
+ * `supply_settings.order_categories_only: true` в config.yaml.
+ *
+ * Признак включения — название категории в запросе, а не слово «только»:
+ * «оставь только pjur» — это совсем другая команда, и слово там то же самое.
+ * @param {string} query
+ * @returns {boolean}
+ */
+function extractCategoriesOnly(query) {
+  const text = String(query || "");
+
+  // Явное «весь товар» перебивает и настройку из конфига.
+  if (/(?:вс[её]|весь|люб(?:ой|ые)|будь-як\p{L}*|any|all)\s+товар/iu.test(text)) {
+    return false;
+  }
+
+  if (mentionsOrderCategory(text)) {
+    return true;
+  }
+
+  return Boolean(loadSupplySettings().order_categories_only);
 }
 
 /**
@@ -241,30 +298,32 @@ function extractMinSellThrough(query) {
 }
 
 /**
- * Вычисляет длину периода отчёта в днях по датам вида «16.08-2.09» или
- * «18.06.2026-05.07.2026» в тексте запроса или имени файла. Если дат нет —
- * возвращает значение по умолчанию из config.yaml.
- * @param {string} text
+ * Длина периода отчёта в днях. Разбор общий с переносом по критериям: он
+ * понимает и «18.06-5.07.2026» в имени файла, и словесное «за 1 рік» —
+ * годовую выгрузку, принятую за 18 дней, заказ раздувал в двадцать раз.
+ *
+ * «период=N» из запроса читаем сами и раньше всего: общий разбор считает
+ * периодом ещё и «days=N», а в замовленні это лимит запаса, а не период.
+ * @param {string} query
+ * @param {string} sourceHint путь/имя файла-отчёта
  * @returns {number}
  */
-function extractPeriodDays(text) {
-  const fallback = loadSupplySettings().default_period_days || FALLBACK_PERIOD_DAYS;
-  const match = String(text || "").match(
-    /(\d{1,2})[.\-/](\d{1,2})(?:[.\-/](\d{2,4}))?\s*[-–—]\s*(\d{1,2})[.\-/](\d{1,2})(?:[.\-/](\d{2,4}))?/
+function extractPeriodDays(query, sourceHint = "") {
+  const explicit = String(query || "").match(
+    /(?:период|перiод|період)\s*[:=]?\s*(\d{1,4})/i
   );
 
-  if (!match) {
-    return fallback;
+  if (explicit) {
+    const days = Number(explicit[1]);
+
+    if (days >= 1 && days <= 1500) {
+      return days;
+    }
   }
 
-  const now = new Date();
-  const fromYear = Number(match[3] || match[6]) || now.getFullYear();
-  const toYear = Number(match[6] || match[3]) || fromYear;
-  const from = new Date(fromYear, Number(match[2]) - 1, Number(match[1]));
-  const to = new Date(toYear, Number(match[5]) - 1, Number(match[4]));
-  const days = Math.round((to.getTime() - from.getTime()) / 86_400_000) + 1;
+  const resolved = resolvePeriod(sourceHint ? [sourceHint] : []).days;
 
-  return days >= 1 && days <= 180 ? days : fallback;
+  return resolved || loadSupplySettings().default_period_days || FALLBACK_PERIOD_DAYS;
 }
 
 /**
@@ -273,11 +332,18 @@ function extractPeriodDays(text) {
  * @returns {SalesOrderOptions}
  */
 function parseOptions(query, sourceHint = "") {
+  const prefixFilter = extractSkuPrefixes(query);
+
   return {
     maxStockDays: extractMaxStockDays(query),
     targetPeriods: extractTargetPeriods(query),
-    skuPrefixes: extractSkuPrefixes(query),
-    periodDays: extractPeriodDays(`${query} ${sourceHint}`),
+    // Порядок строк в файле: если префиксы названы в запросе — их порядок,
+    // иначе привычный из config.yaml.
+    skuPrefixes: prefixFilter || configuredSkuPrefixes(),
+    prefixFilter,
+    categories: orderCategoryTitles(),
+    categoriesOnly: extractCategoriesOnly(query),
+    periodDays: extractPeriodDays(query, sourceHint),
     minSellThrough: extractMinSellThrough(query)
   };
 }
@@ -370,6 +436,40 @@ function findReportFile(query, memories, chatId = null) {
     .filter(file => !looksLikeGeneratedReport(file));
 
   return discovered.find(isLikelyMovementReport) || discovered[0] || null;
+}
+
+/** Сколько выгрузок максимум берём в расчёт перемещения. */
+const MAX_TRANSFER_FILES = 12;
+
+/**
+ * Отчёты, по которым строится лист «Переміщення». Заказ считается по одному
+ * файлу — тому, что назвали; перемещение без второго магазина не существует,
+ * поэтому здесь берём все отчёты движения, что есть в чате: свежие первыми.
+ * @param {string} query
+ * @param {string[]} memories
+ * @param {string|null} [chatId]
+ * @param {string|null} [primary] отчёт заказа — он в списке всегда и первым
+ * @returns {string[]}
+ */
+function findTransferFiles(query, memories, chatId = null, primary = null) {
+  const queryFiles = extractSpreadsheetPaths(query);
+  const memoryFiles = extractSpreadsheetPaths(memories.join("\n")).reverse();
+  const named = unique([
+    ...(primary ? [primary] : []),
+    ...queryFiles,
+    ...memoryFiles
+  ]).filter(file => existsInProject(file) && !looksLikeGeneratedReport(file));
+  // Магазин назвали один — сам по себе он никуда не переезжает, поэтому
+  // добираем остальные выгрузки чата. Назвали несколько — считаем ровно по
+  // ним: раз перечислили руками, значит так и хотели.
+  const candidates = named.length > 1
+    ? named
+    : unique([...named, ...discoverChatFiles(chatId)])
+      .filter(file => !looksLikeGeneratedReport(file));
+
+  return candidates
+    .slice(0, MAX_TRANSFER_FILES)
+    .filter(file => file === primary || isLikelyMovementReport(file));
 }
 
 /**
@@ -470,8 +570,17 @@ function classifyReportRow(row, sourceRow, options, columns) {
   }
 
   const sku = String(row[columns.sku]).trim();
+  const name = String(row[columns.name] || "").trim();
+  // Категория считается всегда — она попадает в колонку «Категорія» и в
+  // сортировку. Отсекает она только тогда, когда об этом попросили: заказ по
+  // умолчанию собирается по любому товару.
+  const category = classifyOrderCategory(name);
 
-  if (!hasAllowedPrefix(sku, options.skuPrefixes)) {
+  if (options.categoriesOnly && !category) {
+    return { stage: "wrong_category", line: null };
+  }
+
+  if (options.prefixFilter && !hasAllowedPrefix(sku, options.prefixFilter)) {
     return { stage: "wrong_prefix", line: null };
   }
 
@@ -513,7 +622,8 @@ function classifyReportRow(row, sourceRow, options, columns) {
     line: {
       sourceRow,
       sku,
-      name: String(row[columns.name] || "").trim(),
+      name,
+      category: category || "",
       start,
       receipt,
       available,
@@ -534,14 +644,16 @@ function classifyReportRow(row, sourceRow, options, columns) {
  * разных точек она разная.
  * @param {import("./reader.js").SheetMatrix} sheet
  * @param {SalesOrderOptions} options
- * @param {string} point название точки (имя вкладки), "" для книги из одного листа
+ * @param {string} sheetPoint название точки по имени вкладки, "" для книги из
+ *   одного листа; строка-склад внутри листа его перебивает
  * @returns {{ lines: SalesOrderLine[], stats: SalesOrderStats }}
  */
-function readReportSheet(sheet, options, point) {
+function readReportSheet(sheet, options, sheetPoint) {
   const rows = sheet.rows;
   const columns = resolveColumns(rows);
   const stats = {
     productRows: 0,
+    categoryMatched: 0,
     prefixMatched: 0,
     withSales: 0,
     lowSellThrough: 0,
@@ -549,8 +661,19 @@ function readReportSheet(sheet, options, point) {
   };
   /** @type {SalesOrderLine[]} */
   const lines = [];
+  // Выгрузка «все магазины» кладёт все точки на один лист и разделяет их
+  // строками-складами. Без этого один и тот же презерватив попадал в заказ
+  // четырнадцать раз подряд, и было не понять, какому магазину он нужен.
+  let point = sheetPoint;
 
   rows.forEach((row, index) => {
+    if (isSectionHeader(row)) {
+      point = String(row[0]).trim();
+      rememberPointName(point);
+
+      return;
+    }
+
     const { stage, line } = classifyReportRow(row, index + 1, options, columns);
 
     if (stage === "not_product") {
@@ -558,6 +681,12 @@ function readReportSheet(sheet, options, point) {
     }
 
     stats.productRows += 1;
+
+    if (stage === "wrong_category") {
+      return;
+    }
+
+    stats.categoryMatched += 1;
 
     if (stage === "wrong_prefix") {
       return;
@@ -590,13 +719,19 @@ function readReportSheet(sheet, options, point) {
 }
 
 /**
- * Один и тот же артикул на нескольких вкладках — это один товар на разных
- * точках. Сейчас каждая точка остаётся отдельной строкой заказа.
+ * Один и тот же артикул на нескольких точках — это один товар в разных
+ * магазинах. Сейчас каждая точка остаётся отдельной строкой заказа.
+ *
+ * Стало заметнее, чем раньше: заказ теперь состоит из презервативов и
+ * лубрикантов, а они лежат во всех четырнадцати магазинах, и выгрузка «все
+ * магазины» разом даёт по строке на магазин. Поставщику уходит одна поставка —
+ * значит, вопрос «одна строка на артикул или строка на магазин» решает, как
+ * читается готовый файл.
  * @param {SalesOrderLine[]} lines
  * @returns {SalesOrderLine[]}
  */
 function combineSheetLines(lines) {
-  // TODO(human): решить, склеивать ли строки одного артикула с разных вкладок.
+  // TODO(human): решить, склеивать ли строки одного артикула с разных точек.
   return lines;
 }
 
@@ -613,6 +748,7 @@ function readReport(filePath, options) {
   const lines = [];
   const stats = {
     productRows: 0,
+    categoryMatched: 0,
     prefixMatched: 0,
     withSales: 0,
     lowSellThrough: 0,
@@ -633,6 +769,18 @@ function readReport(filePath, options) {
   const combined = combineSheetLines(lines);
 
   combined.sort((first, second) => {
+    // Заказ, суженный до категорий, закупщик читает категориями: сначала все
+    // презервативы, потом все лубриканты. В обычном заказе категория есть не у
+    // каждой строки, и группировать по ней нечего — там порядок брендовый.
+    const categoryDiff = options.categoriesOnly
+      ? options.categories.indexOf(first.category) -
+        options.categories.indexOf(second.category)
+      : 0;
+
+    if (categoryDiff !== 0) {
+      return categoryDiff;
+    }
+
     const rankDiff =
       getPrefixRank(first.sku, options.skuPrefixes) -
       getPrefixRank(second.sku, options.skuPrefixes);
@@ -650,6 +798,78 @@ function readReport(filePath, options) {
   });
 
   return { lines: combined, stats };
+}
+
+/**
+ * Позиция «стоит мёртвым грузом на этой точке»: продали меньше порога от того,
+ * что было в наличии, либо остатка хватит дольше, чем товар вообще должен
+ * лежать. Это ровно те строки, которые заказ отсеивает как непродающиеся, —
+ * поэтому они и едут в другой магазин, а не заказываются заново.
+ * @param {import("./transferByCriteria.js").PointMetrics} stock
+ * @param {SalesOrderOptions} options
+ * @param {number} maxStockDays
+ * @returns {boolean}
+ */
+function isStuckStock(stock, options, maxStockDays) {
+  return (
+    stock.sellThrough < options.minSellThrough ||
+    stock.stockDays > maxStockDays
+  );
+}
+
+/**
+ * Второй лист файла: всё, что не ушло в заказ, раскладывается по маршрутам
+ * «откуда → кому». Считается по тому же отчёту, что и заказ, поэтому лист
+ * пустеет, если в выгрузке одна торговая точка — везти физически некуда.
+ * @param {string[]} files отчёты движения: заказ считается по первому,
+ *   перемещение — по всем, иначе на одной точке возить не с чем
+ * @param {SalesOrderLine[]} orderLines
+ * @param {SalesOrderOptions} options
+ * @returns {{ lines: Object[], stats: Object }}
+ */
+function buildOrderTransferPlan(files, orderLines, options) {
+  const settings = resolveTransferSettings();
+  /** @type {import("./deadStock.js").DeadStockRecord[]} */
+  const records = [];
+
+  for (const file of files) {
+    records.push(...readReportFile(file).records);
+  }
+
+  const bySku = buildPointMetrics(records, options.periodDays, settings.coverDays);
+  // Артикул, попавший в заказ, из перемещения исключаем: одна и та же позиция
+  // не должна одновременно докупаться и переезжать.
+  const ordered = new Set(
+    orderLines.map(line => normalizeSkuKey(line.sku)).filter(Boolean)
+  );
+  const plan = planTransfers(bySku, {
+    source: null,
+    destination: null,
+    maxStockDays: settings.maxStockDays,
+    minBatch: settings.minBatch,
+    exclusions: settings.exclusions,
+    isSource: stock =>
+      !ordered.has(normalizeSkuKey(stock.sku)) &&
+      isStuckStock(stock, options, settings.maxStockDays)
+  });
+
+  return {
+    lines: plan.lines,
+    stats: {
+      filesRead: files.length,
+      points: plan.points.size,
+      skus: bySku.size,
+      matched: plan.matched,
+      noDestination: plan.noDestination,
+      excluded: plan.excluded,
+      leftAtSource: plan.leftAtSource,
+      moves: plan.lines.length,
+      units: plan.lines.reduce((sum, line) => sum + Number(line.qty), 0),
+      coverDays: settings.coverDays,
+      maxStockDays: settings.maxStockDays,
+      minBatch: settings.minBatch
+    }
+  };
 }
 
 /**
@@ -781,7 +1001,8 @@ async function writeSalesOrderWorkbook(result) {
     { header: "", key: "stockDays", width: 10 },
     { header: "", key: "sellThrough", width: 10 },
     { header: "Заказ", key: "orderQuantity", width: 10 },
-    ...(withPoint ? [{ header: "Точка", key: "point", width: 12 }] : [])
+    ...(withPoint ? [{ header: "Точка", key: "point", width: 12 }] : []),
+    { header: "Категорія", key: "category", width: 16 }
   ];
 
   for (const line of result.lines) {
@@ -798,7 +1019,8 @@ async function writeSalesOrderWorkbook(result) {
       turnover: valueOrEmpty(line.turnover),
       stockDays: valueOrEmpty(line.stockDays),
       sellThrough: valueOrEmpty(line.sellThrough),
-      point: withPoint ? line.point || "" : undefined
+      point: withPoint ? line.point || "" : undefined,
+      category: line.category || ""
     });
     const rowNumber = row.number;
 
@@ -809,10 +1031,86 @@ async function writeSalesOrderWorkbook(result) {
   }
 
   styleWorksheet(worksheet);
+  addTransferSheet(workbook, result);
 
   await workbook.xlsx.writeFile(filePath);
 
   return filePath;
+}
+
+/**
+ * Лист «Переміщення»: всё, что мы у поставщика не заказываем. Лист создаётся
+ * всегда — пустая таблица с объяснением честнее отсутствующего листа: иначе
+ * непонятно, посчитали перемещение или забыли.
+ * @param {ExcelJS.Workbook} workbook
+ * @param {SalesOrderResult} result
+ * @returns {void}
+ */
+function addTransferSheet(workbook, result) {
+  const worksheet = workbook.addWorksheet("Переміщення");
+  const transfer = result.transfer || { lines: [], stats: {} };
+
+  worksheet.columns = [
+    { header: "Зі складу", key: "from", width: 10 },
+    { header: "На склад", key: "to", width: 10 },
+    { header: "Артикул", key: "sku", width: 18 },
+    { header: "Назва", key: "name", width: 60 },
+    { header: "Кількість", key: "qty", width: 11 },
+    { header: "Реалізація джерела", key: "sellThrough", width: 19 },
+    { header: "Залишок джерела", key: "sourceStock", width: 17 },
+    { header: "Продажі отримувача", key: "destSales", width: 19 },
+    { header: "Залишок отримувача", key: "destStock", width: 19 },
+    { header: "Запас отримувача, дн", key: "destStockDays", width: 21 },
+    { header: "Потрібно отримувачу", key: "destNeed", width: 20 },
+    { header: "Магазин-джерело", key: "fromName", width: 30 },
+    { header: "Магазин-отримувач", key: "toName", width: 30 }
+  ];
+
+  for (const line of transfer.lines) {
+    worksheet.addRow(line);
+  }
+
+  worksheet.getRow(1).font = { bold: true };
+  worksheet.getColumn(6).numFmt = "0%";
+  worksheet.views = [{ state: "frozen", ySplit: 1 }];
+
+  if (transfer.lines.length > 0) {
+    worksheet.autoFilter = {
+      from: { row: 1, column: 1 },
+      to: { row: 1, column: worksheet.columnCount }
+    };
+
+    return;
+  }
+
+  worksheet.addRow({
+    from: "",
+    to: "",
+    sku: "",
+    name: transferEmptyReason(result)
+  });
+}
+
+/**
+ * @param {SalesOrderResult} result
+ * @returns {string}
+ */
+function transferEmptyReason(result) {
+  const stats = (result.transfer && result.transfer.stats) || {};
+
+  if (!stats.points || stats.points < 2) {
+    return "У звіті одна торгова точка — везти нема куди. " +
+      "Надішли вивантаження інших магазинів разом із цим.";
+  }
+
+  if (stats.matched > 0) {
+    return `Позицій без замовлення, що стоять на місці: ${stats.matched}, ` +
+      "але отримувача не знайшлося: потрібен магазин, де товар продається " +
+      `і запасу менше ${stats.maxStockDays} дн.`;
+  }
+
+  return "Усе, що не потрапило в замовлення, продається нормально — " +
+    "перевозити нема чого.";
 }
 
 /**
@@ -861,9 +1159,20 @@ function describeEmptyReport(stats, options) {
     ];
   }
 
+  if (options.categoriesOnly && stats.categoryMatched === 0) {
+    return [
+      `Товарных строк: ${stats.productRows}, но ни одна не относится к ` +
+        `категориям ${options.categories.join(", ")}.`,
+      "Заказ сужен по твоей просьбе. Нужен заказ по всему товару — напиши " +
+        "«заказ поставщику весь товар».",
+      "Слова-признаки категорий — в config.yaml, supply_settings.order_categories."
+    ];
+  }
+
   if (stats.prefixMatched === 0) {
     return [
-      `Товарных строк: ${stats.productRows}, но ни один артикул не начинается с ${prefixes}.`,
+      `Подходящих строк: ${stats.categoryMatched}, ` +
+        `но ни один артикул не начинается с ${prefixes}.`,
       "Уточни префиксы прямо в запросе: замовлення prefixes=SO,PR <файл>.",
       "Префиксы перечисляются через запятую."
     ];
@@ -871,7 +1180,8 @@ function describeEmptyReport(stats, options) {
 
   if (stats.withSales === 0) {
     return [
-      `Артикулов ${prefixes}: ${stats.prefixMatched}, но у всех расход за период равен нулю.`,
+      `Позиций в отборе: ${stats.prefixMatched}, ` +
+        "но у всех расход за период равен нулю.",
       "Проверь, что в отчёте есть колонка «Расход» с данными за период."
     ];
   }
@@ -925,12 +1235,36 @@ export async function prepareSalesOrder(input) {
   }
 
   const { lines, stats } = readReport(sourceFile, options);
+  /** @type {{ lines: Object[], stats: Object, error?: string }} */
+  let transfer;
+
+  try {
+    transfer = buildOrderTransferPlan(
+      findTransferFiles(
+        request.query,
+        request.memories,
+        request.chatId,
+        sourceFile
+      ),
+      lines,
+      options
+    );
+  } catch (error) {
+    // Перемещение — вторая половина файла, но не повод потерять заказ.
+    transfer = {
+      lines: [],
+      stats: {},
+      error: error instanceof Error ? error.message : String(error)
+    };
+  }
+
   const result = {
-    status: lines.length > 0 ? "success" : "empty",
+    status: lines.length > 0 || transfer.lines.length > 0 ? "success" : "empty",
     sourceFile,
     outputPath: null,
     options,
     lines,
+    transfer,
     summary: {
       lines: lines.length,
       recommendedTotal: lines.reduce(
@@ -942,10 +1276,20 @@ export async function prepareSalesOrder(input) {
     notes: []
   };
 
-  if (lines.length === 0) {
+  if (transfer.error) {
+    result.notes.push(`Лист перемещения не собрался: ${transfer.error}`);
+  }
+
+  if (result.status === "empty") {
     result.notes.push(...describeEmptyReport(stats, options));
 
     return result;
+  }
+
+  if (lines.length === 0) {
+    result.notes.push(
+      "Заказывать нечего: " + describeEmptyReport(stats, options)[0]
+    );
   }
 
   result.outputPath = await writeSalesOrderWorkbook(result);
@@ -975,18 +1319,40 @@ export function formatSalesOrderResult(result) {
   const soldShare = stats.prefixMatched
     ? Math.round((stats.withSales / stats.prefixMatched) * 100)
     : 0;
+  const transfer = result.transfer || { lines: [], stats: {} };
+  const moveStats = transfer.stats || {};
+  const notMine = (stats.productRows || 0) - (stats.categoryMatched || 0);
 
   return [
     "Замовлення Т1 подготовлено.",
     `Excel-файл: ${result.outputPath}`,
-    `Позиции: ${result.summary.lines}`,
-    `Рекомендовано к заказу: ${result.summary.recommendedTotal} ед.`,
+    `Лист «Замовлення» (${result.options.categoriesOnly
+      ? result.options.categories.join(" + ")
+      : "весь товар"}): ` +
+      `${result.summary.lines} позиций, ${result.summary.recommendedTotal} ед. к заказу`,
+    `Лист «Переміщення»: ${moveStats.moves || 0} строк, ${moveStats.units || 0} ед. ` +
+      `по ${moveStats.points || 0} точкам (выгрузок в расчёте: ${moveStats.filesRead || 0})`,
+    ...(transfer.lines.length === 0
+      ? [`  ${transferEmptyReason(result)}`]
+      : []),
     `Продажи: ${stats.withSales || 0} из ${stats.prefixMatched || 0} артикулов (${soldShare}%), ` +
       `непродажи — ${100 - soldShare}%`,
-    `Отсеяно: <${percent}% реализации — ${stats.lowSellThrough || 0}, ` +
+    `Отсеяно из заказа: ` +
+      (result.options.categoriesOnly ? `не та категория — ${notMine}, ` : "") +
+      `<${percent}% реализации — ${stats.lowSellThrough || 0}, ` +
       `затоварено — ${stats.overstocked || 0}`,
-    `Фильтр: артикулы ${result.options.skuPrefixes.join(", ")}, реализация от ${percent}%, запас до ${result.options.maxStockDays} дней`,
+    result.options.categoriesOnly
+      ? `Заказ сужен до категорий: ${result.options.categories.join(", ")}. ` +
+        "Нужен весь товар — напиши «заказ поставщику весь товар»."
+      : "Заказ по всему товару. Нужны только презервативы и лубриканты — " +
+        "напиши «заказ только презервативы и лубриканты» или нажми кнопку " +
+        "«🧴 Заказ: презервативы + лубриканты».",
+    `Фильтр заказа: реализация от ${percent}%, запас до ${result.options.maxStockDays} дней` +
+      (result.options.prefixFilter
+        ? `, артикулы ${result.options.prefixFilter.join(", ")}`
+        : ""),
     `Период отчёта: ${result.options.periodDays} дн., запас на ${result.options.targetPeriods} периода(ов)`,
+    ...result.notes.map(note => `  ${note}`),
     `Источник: ${toProjectPath(resolveProjectPath(result.sourceFile))}`
   ].join("\n");
 }

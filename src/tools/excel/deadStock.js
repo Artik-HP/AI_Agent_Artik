@@ -15,6 +15,7 @@ import {
   toProjectPath
 } from "./reader.js";
 import { parseNumber } from "./search.js";
+import { rememberPointName } from "./points.js";
 
 /**
  * Тексты заголовков, по которым находим колонки продаж. Раскладка выгрузок
@@ -91,7 +92,7 @@ function pointFromFileName(filePath) {
  * @param {unknown[]} row
  * @returns {boolean}
  */
-function isSectionHeader(row) {
+export function isSectionHeader(row) {
   const first = String(row[0] || "").trim();
   const second = String(row[1] || "").trim();
 
@@ -197,6 +198,9 @@ function readReportSheet(sheet, context) {
 
     if (isSectionHeader(row)) {
       point = String(row[0]).trim();
+      // Реестр точек запоминает, что «Toppers 01 Lviv Gnatuka» — это Т1;
+      // без этого запрос «перенеси с Т1» не нашёл бы ни одной строки.
+      rememberPointName(point);
       continue;
     }
 

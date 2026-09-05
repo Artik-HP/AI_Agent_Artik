@@ -6,13 +6,26 @@ import {
 import { writeReportWorkbook } from "./writer.js";
 import { normalizeSkuKey, readReportFile } from "./deadStock.js";
 import { allocateProportionally } from "./redistribute.js";
-import { loadSupplySettings } from "./reportGenerator.js";
+import { loadSupplySettings, loadTransferSettings } from "./reportGenerator.js";
+import {
+  comparePointCodes,
+  normalizePointCode,
+  parseDestinationPoint,
+  parseSourcePoint,
+  pointName
+} from "./points.js";
+
+// Разбор складов из текста запроса живёт в реестре точек: там же лежит
+// сопоставление «Toppers 01 Lviv Gnatuka» ↔ «Т1», без которого «перенеси с Т1»
+// не находило ни одной строки.
+export { parseSourcePoint, parseDestinationPoint };
 
 const FALLBACK_PERIOD_DAYS = 14;
 
 /**
  * @typedef {Object} PointMetrics
- * @property {string} point
+ * @property {string} code канонический код точки: «Т1», «Х2»
+ * @property {string} point как точка названа в отчёте
  * @property {string} sku
  * @property {string} name
  * @property {number} retail розничные продажи за период
@@ -22,6 +35,7 @@ const FALLBACK_PERIOD_DAYS = 14;
  * @property {number} expense расход за период
  * @property {number} sellThrough расход / доступно, 0..1
  * @property {number} stockDays на сколько дней хватит ОСТАТКА при текущей скорости
+ * @property {number} need сколько единиц не хватает до целевого покрытия
  */
 
 /**
@@ -94,29 +108,6 @@ const WORD_OPERATORS = {
 };
 
 /**
- * «с т5», «со склада=Т5», «из x2» → «Т5» / «Х2». Без указания источник любой —
- * это основной режим, склад пишут только когда нужно сузить до одной точки.
- * Латинские T и X приводим к кириллице: на клавиатуре их путают постоянно,
- * а точки в выгрузках названы кириллицей, и «t5» иначе не совпал бы ни с чем.
- * @param {string} query
- * @returns {string|null}
- */
-export function parseSourcePoint(query) {
-  const match = String(query || "").match(
-    /(?:^|\s)(?:со?|из|від|from)\s*(?:склада|складу)?\s*[:=]?\s*([\p{L}]\s*\d{1,3})(?!\d)/u
-  );
-
-  if (!match) {
-    return null;
-  }
-
-  const code = match[1].replace(/\s+/g, "").toUpperCase();
-  const latinToCyrillic = { T: "Т", X: "Х" };
-
-  return (latinToCyrillic[code[0]] || code[0]) + code.slice(1);
-}
-
-/**
  * Достаёт условия вида «реализация<20%», «остаток > 10», «продаж меньше 3»,
  * «запас>60». Несколько условий работают через И.
  * @param {string} query
@@ -160,39 +151,79 @@ export function parseCriteria(query) {
 }
 
 /**
- * Длина периода из имён файлов («16.08-2.09.2026»), иначе из config.yaml.
+ * Длина периода отчёта. Порядок источников — от самого надёжного к самому
+ * общему: слово пользователя («период=730»), диапазон дат в имени файла
+ * («16.08-2.09.2026»), словесный срок («за 2 роки» — так назван реальный файл
+ * годовой выгрузки), и только потом дефолт из config.yaml.
+ *
+ * Период — не косметика: от него считаются «дней запаса», а по ним отбираются
+ * получатели. Выгрузку за два года, принятую за 18 дней, бот счёл бы сетью,
+ * которая вот-вот останется без товара.
  * @param {string[]} files
- * @returns {number}
+ * @param {string} [query]
+ * @returns {{ days: number, source: "запрос"|"даты в имени файла"|"срок в названии"|"config.yaml" }}
  */
-function resolvePeriodDays(files) {
+export function resolvePeriod(files, query = "") {
   const fallback = loadSupplySettings().default_period_days || FALLBACK_PERIOD_DAYS;
-  const match = files.join(" ").match(
+  const text = `${query} ${files.join(" ")}`;
+
+  const explicit = String(query).match(
+    /(?:период|перiод|період|дней|дни|днів|days)\s*[:=]?\s*(\d{1,4})/i
+  );
+
+  if (explicit) {
+    const days = Number(explicit[1]);
+
+    if (days >= 1 && days <= 1500) {
+      return { days, source: "запрос" };
+    }
+  }
+
+  const range = text.match(
     /(\d{1,2})[.\-/](\d{1,2})(?:[.\-/](\d{2,4}))?\s*[-–—]\s*(\d{1,2})[.\-/](\d{1,2})(?:[.\-/](\d{2,4}))?/
   );
 
-  if (!match) {
-    return fallback;
+  if (range) {
+    const now = new Date();
+    const fromYear = Number(range[3] || range[6]) || now.getFullYear();
+    const toYear = Number(range[6] || range[3]) || fromYear;
+    const from = new Date(fromYear, Number(range[2]) - 1, Number(range[1]));
+    const to = new Date(toYear, Number(range[5]) - 1, Number(range[4]));
+    const days = Math.round((to.getTime() - from.getTime()) / 86_400_000) + 1;
+
+    if (days >= 1 && days <= 180) {
+      return { days, source: "даты в имени файла" };
+    }
   }
 
-  const now = new Date();
-  const fromYear = Number(match[3] || match[6]) || now.getFullYear();
-  const toYear = Number(match[6] || match[3]) || fromYear;
-  const from = new Date(fromYear, Number(match[2]) - 1, Number(match[1]));
-  const to = new Date(toYear, Number(match[5]) - 1, Number(match[4]));
-  const days = Math.round((to.getTime() - from.getTime()) / 86_400_000) + 1;
+  const spelled = text.match(
+    /за\s+(\d{1,2})\s*(рок|рік|год|лет|мес|міс|month|year)/i
+  );
 
-  return days >= 1 && days <= 180 ? days : fallback;
+  if (spelled) {
+    const unit = spelled[2].toLowerCase();
+    const perUnit = /мес|міс|month/.test(unit) ? 30 : 365;
+
+    return { days: Number(spelled[1]) * perUnit, source: "срок в названии" };
+  }
+
+  return { days: fallback, source: "config.yaml" };
 }
 
 /**
  * Схлопывает строки одного товара на одной точке и считает метрики. Движение
  * (расход, приход, продажи) складывается, снимки (начало, конец) берутся
  * максимальные — один склад может встретиться в двух пересекающихся выгрузках.
+ *
+ * Ключ точки — канонический код, а не текст: одна и та же Т1 приходит и
+ * строкой-складом «Toppers 01 Lviv Gnatuka», и именем файла «Т1 6.08-23.08»,
+ * и без склейки считалась бы двумя разными магазинами.
  * @param {import("./deadStock.js").DeadStockRecord[]} records
  * @param {number} periodDays
- * @returns {Map<string, Map<string, PointMetrics>>} sku -> точка -> метрики
+ * @param {number} coverDays на сколько дней продаж наполняем получателя
+ * @returns {Map<string, Map<string, PointMetrics>>} sku -> код точки -> метрики
  */
-function groupBySkuAndPoint(records, periodDays) {
+function groupBySkuAndPoint(records, periodDays, coverDays) {
   /** @type {Map<string, Map<string, PointMetrics>>} */
   const bySku = new Map();
 
@@ -210,10 +241,12 @@ function groupBySkuAndPoint(records, periodDays) {
       bySku.set(key, points);
     }
 
-    const existing = points.get(record.point);
+    const code = normalizePointCode(record.point) || record.point;
+    const existing = points.get(code);
 
     if (!existing) {
-      points.set(record.point, {
+      points.set(code, {
+        code,
         point: record.point,
         sku: record.sku,
         name: record.name,
@@ -223,7 +256,8 @@ function groupBySkuAndPoint(records, periodDays) {
         available: record.start + record.receipt,
         expense: record.expense,
         sellThrough: 0,
-        stockDays: 0
+        stockDays: 0,
+        need: 0
       });
       continue;
     }
@@ -246,6 +280,12 @@ function groupBySkuAndPoint(records, periodDays) {
       metrics.stockDays = metrics.expense > 0
         ? (metrics.end * periodDays) / metrics.expense
         : Infinity;
+      // Потребность получателя той же природы, что и заказ поставщику:
+      // сколько довезти, чтобы хватило на coverDays дней его же продаж.
+      metrics.need = Math.max(
+        0,
+        Math.ceil((metrics.retail / periodDays) * coverDays - metrics.end)
+      );
     }
   }
 
@@ -279,6 +319,31 @@ export function formatCriterion(criterion) {
 }
 
 /**
+ * Компилирует список «не переносить» из config.yaml. Кривой шаблон не должен
+ * ронять отчёт — он просто выпадает из списка.
+ * @param {unknown} patterns
+ * @returns {RegExp[]}
+ */
+function compileExclusions(patterns) {
+  if (!Array.isArray(patterns)) {
+    return [];
+  }
+
+  /** @type {RegExp[]} */
+  const compiled = [];
+
+  for (const pattern of patterns) {
+    try {
+      compiled.push(new RegExp(String(pattern), "i"));
+    } catch {
+      // Кривой шаблон игнорируем.
+    }
+  }
+
+  return compiled;
+}
+
+/**
  * @param {CriteriaMoveResult} result
  * @param {string|null} outDir
  * @returns {Promise<string>}
@@ -289,26 +354,189 @@ async function writeWorkbook(result, outDir) {
     sheetName: "Перенос",
     outDir,
     columns: [
-      { header: "Со склада", key: "from", width: 12 },
-      { header: "На склад", key: "to", width: 12 },
+      { header: "Со склада", key: "from", width: 10 },
+      { header: "На склад", key: "to", width: 10 },
       { header: "Артикул", key: "sku", width: 18 },
       { header: "Название", key: "name", width: 44 },
-      { header: "Кол-во", key: "qty", width: 10 },
+      { header: "Кол-во", key: "qty", width: 9 },
       { header: "Реализация источника", key: "sellThrough", width: 20, numFmt: "0%" },
       { header: "Остаток источника", key: "sourceStock", width: 18 },
       { header: "Продажи получателя", key: "destSales", width: 18 },
-      { header: "Доля", key: "share", width: 10, numFmt: "0%" }
+      { header: "Остаток получателя", key: "destStock", width: 18 },
+      { header: "Запас получателя, дн", key: "destStockDays", width: 20 },
+      { header: "Нужно получателю", key: "destNeed", width: 17 },
+      { header: "Магазин-источник", key: "fromName", width: 30 },
+      { header: "Магазин-получатель", key: "toName", width: 30 }
     ],
     rows: result.lines
   });
 }
 
 /**
- * Переносит товар по заданным критериям: «перенеси где реализация<20%».
- * По умолчанию источником считается любая подходящая точка; конкретный склад
- * задаётся явно («перенеси с Т5 ...») и тогда сужает выборку. Отобранная позиция
- * вывозится целиком, объём делится между точками, где она продаётся,
- * пропорционально их розничным продажам.
+ * @typedef {Object} TransferPlanOptions
+ * @property {string|null} source откуда везём; null — любая подходящая точка
+ * @property {string|null} destination куда везём; null — кому товар нужен
+ * @property {number} maxStockDays получатель нуждается, если запаса меньше
+ * @property {number} minBatch минимальная партия в строке перемещения
+ * @property {RegExp[]} exclusions артикулы, которые не возим вообще
+ * @property {(stock: PointMetrics) => boolean} isSource годится ли точка как источник
+ */
+
+/**
+ * Раскладывает остатки по маршрутам «откуда → кому». Источник задаётся
+ * предикатом: «перенеси где реализация<20%» передаёт сюда проверку критериев,
+ * заказ поставщику — «этой позиции нет в заказе, значит её надо возить».
+ *
+ * Получатель — магазин, которому товар реально нужен: он его продаёт, запаса
+ * у него меньше maxStockDays дней и до целевого покрытия не хватает единиц.
+ * Везём столько, сколько получателю нужно, но не больше, чем лежит у
+ * источника; при дефиците делим пропорционально потребностям.
+ * @param {Map<string, Map<string, PointMetrics>>} bySku
+ * @param {TransferPlanOptions} options
+ * @returns {{ lines: Object[], points: Set<string>, matched: number, noDestination: number, excluded: number, leftAtSource: number }}
+ */
+export function planTransfers(bySku, options) {
+  /** @type {Object[]} */
+  const lines = [];
+  const points = new Set();
+  let matched = 0;
+  let noDestination = 0;
+  let excluded = 0;
+  let leftAtSource = 0;
+
+  for (const pointMap of bySku.values()) {
+    const stocks = [...pointMap.values()];
+
+    stocks.forEach(stock => points.add(stock.code));
+
+    // Сертификаты и прочее «не товар» между магазинами не возят.
+    if (options.exclusions.some(pattern => pattern.test(stocks[0].sku))) {
+      excluded += 1;
+      continue;
+    }
+
+    const sources = stocks.filter(stock =>
+      (!options.source || stock.code === options.source) &&
+      stock.end > 0 &&
+      options.isSource(stock)
+    );
+
+    for (const from of sources) {
+      matched += 1;
+
+      // «Нужный toppers»: товар у него продаётся, запас скоро кончится и до
+      // целевого покрытия действительно не хватает штук.
+      const destinations = stocks
+        .filter(stock =>
+          stock.code !== from.code &&
+          (!options.destination || stock.code === options.destination) &&
+          stock.retail > 0 &&
+          stock.stockDays < options.maxStockDays &&
+          stock.need > 0
+        )
+        .sort((first, second) => second.need - first.need);
+
+      if (destinations.length === 0) {
+        noDestination += 1;
+        continue;
+      }
+
+      const supply = Math.floor(from.end);
+
+      if (supply < 1) {
+        continue;
+      }
+
+      const needs = destinations.map(stock => stock.need);
+      const totalNeed = needs.reduce((sum, value) => sum + value, 0);
+      // Хватает на всех — каждый получает ровно свою потребность, излишек
+      // остаётся на источнике. Не хватает — делим пропорционально нужде.
+      const quantities = supply >= totalNeed
+        ? needs
+        : allocateProportionally(supply, needs);
+      let shipped = 0;
+
+      destinations.forEach((target, index) => {
+        const qty = quantities[index];
+
+        // Партия меньше минимальной не окупает поездку между магазинами.
+        if (qty < options.minBatch) {
+          return;
+        }
+
+        shipped += qty;
+
+        lines.push({
+          from: from.code,
+          to: target.code,
+          sku: from.sku,
+          name: from.name || target.name,
+          qty,
+          sellThrough: Number(from.sellThrough.toFixed(3)),
+          sourceStock: from.end,
+          destSales: target.retail,
+          destStock: target.end,
+          destStockDays: Number.isFinite(target.stockDays)
+            ? Math.round(target.stockDays)
+            : "",
+          destNeed: target.need,
+          fromName: pointName(from.code),
+          toName: pointName(target.code)
+        });
+      });
+
+      leftAtSource += supply - shipped;
+    }
+  }
+
+  lines.sort((first, second) =>
+    comparePointCodes(first.from, second.from) ||
+    String(first.sku).localeCompare(String(second.sku)) ||
+    comparePointCodes(first.to, second.to)
+  );
+
+  return { lines, points, matched, noDestination, excluded, leftAtSource };
+}
+
+/**
+ * Собирает метрики по точкам из уже прочитанных строк отчёта. Вынесено ради
+ * заказа поставщику: ему нужен тот же расклад «артикул → точка → метрики»,
+ * что и переносу по критериям.
+ * @param {import("./deadStock.js").DeadStockRecord[]} records
+ * @param {number} periodDays
+ * @param {number} coverDays
+ * @returns {Map<string, Map<string, PointMetrics>>}
+ */
+export function buildPointMetrics(records, periodDays, coverDays) {
+  return groupBySkuAndPoint(records, periodDays, coverDays);
+}
+
+/**
+ * Настройки переноса в готовом к употреблению виде: числа приведены,
+ * шаблоны исключений скомпилированы.
+ * @returns {{ coverDays: number, maxStockDays: number, minBatch: number, exclusions: RegExp[] }}
+ */
+export function resolveTransferSettings() {
+  const settings = loadTransferSettings();
+
+  return {
+    coverDays: Math.max(0, Number(settings.cover_days) || 0),
+    maxStockDays: Number(settings.max_stock_days) || Infinity,
+    minBatch: Math.max(1, Number(settings.min_batch) || 1),
+    exclusions: compileExclusions(settings.exclude_sku_patterns)
+  };
+}
+
+
+/**
+ * Переносит товар по заданным критериям: «перенеси с Т1 где реализация<20%».
+ *
+ * Источник — точка, подходящая под условие из запроса (без указания склада
+ * рассматриваются все). Получатель — магазин, которому товар реально нужен:
+ * он его продаёт, запаса у него меньше `max_stock_days` дней и до целевого
+ * покрытия не хватает единиц. Везём столько, сколько получателю нужно, но не
+ * больше, чем лежит у источника; при дефиците делим пропорционально
+ * потребностям. Всё, что не разошлось, остаётся на источнике.
  * @param {unknown} input
  * @returns {Promise<CriteriaMoveResult>}
  */
@@ -316,6 +544,7 @@ export async function buildCriteriaTransfer(input) {
   const request = normalizeInput(input);
   const files = resolveFiles(request);
   const source = parseSourcePoint(request.query);
+  const destination = parseDestinationPoint(request.query);
   const criteria = parseCriteria(request.query);
 
   if (files.length === 0) {
@@ -323,6 +552,7 @@ export async function buildCriteriaTransfer(input) {
       status: "needs_file",
       files: [],
       source,
+      destination,
       criteria,
       lines: [],
       outputPath: null,
@@ -340,15 +570,16 @@ export async function buildCriteriaTransfer(input) {
       status: "needs_criteria",
       files,
       source,
+      destination,
       criteria,
       lines: [],
       outputPath: null,
       stats: {},
       notes: [
         "Не понял критерий. Напиши условие явно, например:",
-        "• «перенеси где реализация<20%»",
+        "• «перенеси с Т1 где реализация<20%»",
         "• «перенеси где остаток>10 реализация<40%»",
-        "• «перенеси где продаж<3»",
+        "• «перенеси с toppers 1 на т9 где продаж<3»",
         "• «перенеси где запас>60»",
         "Критерии: реализация (%), продаж (шт), остаток (шт), запас (дней).",
         "Считаю по всем точкам. Нужен один магазин — допиши: «перенеси с Т5 ...»."
@@ -356,7 +587,13 @@ export async function buildCriteriaTransfer(input) {
     };
   }
 
-  const periodDays = resolvePeriodDays(files);
+  const settings = loadTransferSettings();
+  const coverDays = Math.max(0, Number(settings.cover_days) || 0);
+  const maxStockDays = Number(settings.max_stock_days) || Infinity;
+  const minBatch = Math.max(1, Number(settings.min_batch) || 1);
+  const exclusions = compileExclusions(settings.exclude_sku_patterns);
+  const period = resolvePeriod(files, request.query);
+  const periodDays = period.days;
   /** @type {import("./deadStock.js").DeadStockRecord[]} */
   const records = [];
 
@@ -364,83 +601,32 @@ export async function buildCriteriaTransfer(input) {
     records.push(...readReportFile(file).records);
   }
 
-  const bySku = groupBySkuAndPoint(records, periodDays);
-  /** @type {Object[]} */
-  const lines = [];
-  const points = new Set();
-  let matched = 0;
-  let noDestination = 0;
-
-  for (const pointMap of bySku.values()) {
-    const stocks = [...pointMap.values()];
-
-    stocks.forEach(stock => points.add(stock.point));
-
-    const sources = stocks.filter(stock =>
-      (!source || stock.point.toUpperCase() === source) &&
-      stock.end > 0 &&
-      matchesCriteria(stock, criteria)
-    );
-
-    for (const from of sources) {
-      matched += 1;
-
-      const destinations = stocks.filter(stock =>
-        stock.point !== from.point && stock.retail > 0
-      );
-
-      if (destinations.length === 0) {
-        noDestination += 1;
-        continue;
-      }
-
-      const units = Math.floor(from.end);
-
-      if (units < 1) {
-        continue;
-      }
-
-      const salesTotal = destinations.reduce((sum, stock) => sum + stock.retail, 0);
-      const quantities = allocateProportionally(
-        units,
-        destinations.map(stock => stock.retail)
-      );
-
-      destinations.forEach((destination, index) => {
-        const qty = quantities[index];
-
-        if (qty < 1) {
-          return;
-        }
-
-        lines.push({
-          from: from.point,
-          to: destination.point,
-          sku: from.sku,
-          name: from.name || destination.name,
-          qty,
-          sellThrough: Number(from.sellThrough.toFixed(3)),
-          sourceStock: from.end,
-          destSales: destination.retail,
-          share: salesTotal > 0 ? destination.retail / salesTotal : 0
-        });
-      });
-    }
-  }
-
-  lines.sort((first, second) =>
-    String(first.from).localeCompare(String(second.from)) ||
-    String(first.sku).localeCompare(String(second.sku)) ||
-    String(first.to).localeCompare(String(second.to))
-  );
+  const bySku = groupBySkuAndPoint(records, periodDays, coverDays);
+  const plan = planTransfers(bySku, {
+    source,
+    destination,
+    maxStockDays,
+    minBatch,
+    exclusions,
+    isSource: stock => matchesCriteria(stock, criteria)
+  });
+  const lines = plan.lines;
+  const points = plan.points;
+  const { matched, noDestination, excluded, leftAtSource } = plan;
 
   const stats = {
     filesRead: files.length,
     periodDays,
+    periodSource: period.source,
     points: points.size,
     skus: bySku.size,
     matched,
     noDestination,
+    excluded,
+    leftAtSource,
+    coverDays,
+    maxStockDays,
+    minBatch,
     moves: lines.length,
     units: lines.reduce((sum, line) => sum + Number(line.qty), 0)
   };
@@ -450,6 +636,7 @@ export async function buildCriteriaTransfer(input) {
     status: lines.length > 0 ? "success" : "empty",
     files,
     source,
+    destination,
     criteria,
     lines,
     outputPath: null,
@@ -463,6 +650,13 @@ export async function buildCriteriaTransfer(input) {
         ? `На складе ${source} нет позиций, подходящих под условие.`
         : "Ни одна позиция не подошла под условие."
     );
+
+    if (matched > 0) {
+      result.notes.push(
+        `Под условие подошло позиций: ${matched}, но получателя не нашлось: ` +
+        `нужен магазин, где товар продаётся и запаса меньше ${maxStockDays} дн.`
+      );
+    }
 
     return result;
   }
@@ -492,16 +686,29 @@ export function formatCriteriaTransferResult(result) {
   }
 
   const stats = result.stats;
+  const from = result.source
+    ? `${result.source} (${pointName(result.source)})`
+    : "все точки";
+  const to = result.destination
+    ? `${result.destination} (${pointName(result.destination)})`
+    : "кому товар нужен";
 
   return [
     "Перенос по критериям готов.",
     `Excel-файл: ${result.outputPath}`,
     `Условие: ${conditions}`,
-    `Со склада: ${result.source || "все точки"}`,
-    `Файлов: ${stats.filesRead}, складов: ${stats.points}, период: ${stats.periodDays} дн.`,
+    `Со склада: ${from}`,
+    `На склад: ${to}`,
+    `Файлов: ${stats.filesRead}, складов: ${stats.points}, период: ${stats.periodDays} дн.` +
+      (stats.periodSource === "config.yaml"
+        ? " — период не виден в данных, взят из config.yaml. Если он другой,"
+          + " допиши «период=730»."
+        : ` (${stats.periodSource})`),
     `Позиций подошло: ${stats.matched}, некуда везти: ${stats.noDestination}`,
-    `Строк переноса: ${stats.moves}, единиц: ${stats.units}`,
-    "Позиция вывозится целиком, объём делится пропорционально продажам получателей."
+    `Строк переноса: ${stats.moves}, единиц: ${stats.units}, ` +
+      `осталось на источниках: ${stats.leftAtSource}`,
+    `Получатель — где товар продаётся и запаса меньше ${stats.maxStockDays} дн.; ` +
+      `везём запас на ${stats.coverDays} дн. его продаж, партия от ${stats.minBatch} шт.`
   ].join("\n");
 }
 

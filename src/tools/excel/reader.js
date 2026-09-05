@@ -403,7 +403,7 @@ export function sheetPointName(sheetName, sheetCount) {
   }
 
   return String(sheetName || "")
-    .replace(/^наs+/i, "")
+    .replace(/^на\s+/i, "")
     .trim() || null;
 }
 
