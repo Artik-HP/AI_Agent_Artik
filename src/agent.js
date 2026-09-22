@@ -1,4 +1,7 @@
 // @ts-nocheck
+import fs from "node:fs";
+import path from "node:path";
+
 import defaultAgent from "./agents/default.js";
 import coder from "./agents/coder.js";
 import architect from "./agents/architect.js";
@@ -14,6 +17,7 @@ import { askModel } from "./model.js";
 import { describeRunningCode } from "./version.js";
 import { getDatabaseStatus } from "./database.js";
 import { hasSheetIntent } from "./tools/excel/sheets.js";
+import { drawImage, editImage, formatImageResult } from "./tools/drawImage.js";
 const MODELS = {
   default: process.env.MODEL_DEFAULT,
   coder: process.env.MODEL_CODER,
@@ -160,11 +164,124 @@ export function shouldUseExcelTool(lower) {
   );
 }
 
+/** Однозначные глаголы рисования — объект («картинку») после них не нужен. */
+const DRAW_VERBS = ["нарисуй", "нарисуйте", "нарисовать", "draw"];
+
 /**
+ * Многозначные глаголы общего действия. «Сделай» и «создай» участвуют и в
+ * других командах («сделай заказ поставщику»), поэтому распознаём их как
+ * рисование, только если рядом явно стоит «картинку»/«изображение».
+ */
+const DRAW_VERBS_WITH_OBJECT = [
+  "сгенерируй",
+  "сгенерировать",
+  "создай",
+  "создать",
+  "сделай",
+  "сделать"
+];
+
+const DRAW_OBJECTS = ["картинку", "изображение", "фото", "рисунок"];
+
+/**
+ * Ищет word как отдельный токен (не часть другого слова) в lowerText.
+ * `\bслово\b` тут не подходит: граница \b в JS-регулярках считается только
+ * на стыке с [A-Za-z0-9_], а кириллица в \w не входит — обычный \b её не
+ * ловит и совпадает где попало. Поэтому границу проверяем вручную.
+ * @param {string} lowerText
+ * @param {string} word
+ * @returns {{start: number, end: number}|null}
+ */
+function findStandaloneWord(lowerText, word) {
+  const isLetterOrDigit = (/** @type {string} */ char) =>
+    /[a-zа-яё0-9]/i.test(char);
+
+  let fromIndex = 0;
+
+  while (fromIndex <= lowerText.length) {
+    const index = lowerText.indexOf(word, fromIndex);
+
+    if (index === -1) {
+      return null;
+    }
+
+    const before = index > 0 ? lowerText[index - 1] : "";
+    const after = index + word.length < lowerText.length
+      ? lowerText[index + word.length]
+      : "";
+
+    if (!isLetterOrDigit(before) && !isLetterOrDigit(after)) {
+      return { start: index, end: index + word.length };
+    }
+
+    fromIndex = index + word.length;
+  }
+
+  return null;
+}
+
+/**
+ * @param {string} lowerText
+ * @param {string[]} words
+ * @returns {{start: number, end: number}|null}
+ */
+function findEarliestStandaloneWord(lowerText, words) {
+  return words
+    .map(word => findStandaloneWord(lowerText, word))
+    .filter(Boolean)
+    .sort((a, b) => a.start - b.start)[0] || null;
+}
+
+/**
+ * Срезает ведущее «картинку»/«изображение» и т.п. из остатка фразы — так
+ * «нарисуй картинку дракона» и «нарисуй дракона» дают один и тот же промпт.
+ * @param {string} remainder
+ * @param {string} lowerRemainder
+ * @returns {string}
+ */
+/**
+ * Срезает ведущую пунктуацию и пробелы («, пожалуйста, » после глагола),
+ * не трогая сам текст описания. `\p{L}`/`\p{N}` с флагом `u` корректно
+ * распознают кириллицу как буквы — в отличие от `\w`.
+ * @param {string} value
+ * @returns {string}
+ */
+function stripLeadingPunctuation(value) {
+  return value.replace(/^[^\p{L}\p{N}]+/u, "");
+}
+
+function stripLeadingObjectWord(remainder, lowerRemainder) {
+  for (const object of DRAW_OBJECTS) {
+    if (lowerRemainder === object) {
+      return "";
+    }
+
+    if (lowerRemainder.startsWith(`${object} `)) {
+      return stripLeadingPunctuation(remainder.slice(object.length));
+    }
+  }
+
+  return remainder;
+}
+
+/**
+ * Достаёт описание картинки из свободной фразы. Раньше глагол рисования
+ * ловился только в самом начале сообщения точным префиксом — «нарисуй,
+ * пожалуйста, дракона» (запятая) или «слушай, нарисуй дракона» (глагол не
+ * первый) не совпадали ни с чем и улетали в LLM-роутер. А там всего один
+ * пример на инструмент draw («нарисуй кота-программиста»), и слабая модель
+ * роутера иногда повторяет этот пример буквально вместо реального запроса —
+ * отсюда кот вместо того, что просил пользователь. Прямое правило теперь
+ * ищет глагол как отдельное слово где угодно в сообщении, а не только в
+ * начале, и не зависит от LLM.
  * @param {string} text
  * @param {string} lower
  * @returns {string|null}
  */
+function isDrawingDiscussion(lower) {
+  return /^(?:пожалуйста[,\s]+)?(?:не\s+(?:рисуй|нарисуй|рисовать|генерируй|создавай)|объясни|расскажи|что\s+(?:значит|означает)|как\s+(?:работает|использовать))(?=[\s,:.!?]|$)/iu.test(lower);
+}
+
 function extractDrawPrompt(text, lower) {
   const slashCommands = [
     "/draw",
@@ -182,29 +299,104 @@ function extractDrawPrompt(text, lower) {
     }
   }
 
-  const naturalPrefixes = [
-    "нарисуй картинку ",
-    "нарисуй изображение ",
-    "нарисовать картинку ",
-    "нарисовать изображение ",
-    "сгенерируй картинку ",
-    "сгенерируй изображение ",
-    "создай картинку ",
-    "создай изображение ",
-    "сделай картинку ",
-    "draw ",
-    "нарисуй "
-  ];
-
-  const prefix = naturalPrefixes.find(item =>
-    lower.startsWith(item)
-  );
-
-  if (!prefix) {
+  if (isDrawingDiscussion(lower)) {
     return null;
   }
 
-  return text.slice(prefix.length).trim();
+  // Автоматически выполняем только команду с допустимым вступлением.
+  // Глагол внутри цитаты или объяснения должен разбирать обычный диалог.
+  const isCommandPrefix = start => /^(?:(?:пожалуйста|слушай|можешь|можете|ты|вы|мне)[,\s]*)*$/iu
+    .test(lower.slice(0, start));
+  const verbMatch = findEarliestStandaloneWord(lower, DRAW_VERBS);
+
+  if (verbMatch && isCommandPrefix(verbMatch.start)) {
+    return stripLeadingObjectWord(
+      stripLeadingPunctuation(text.slice(verbMatch.end)),
+      stripLeadingPunctuation(lower.slice(verbMatch.end))
+    );
+  }
+
+  const genericVerbMatch = findEarliestStandaloneWord(lower, DRAW_VERBS_WITH_OBJECT);
+
+  if (genericVerbMatch && isCommandPrefix(genericVerbMatch.start)) {
+    // Объект должен стоять рядом с глаголом (в пределах короткого окна), а
+    // не где угодно в сообщении — иначе «сделай заказ, там ещё рисунок на
+    // упаковке» тоже сочли бы рисованием.
+    const window = lower.slice(genericVerbMatch.end, genericVerbMatch.end + 30);
+    const hasObjectNearby = DRAW_OBJECTS.some(object =>
+      findStandaloneWord(window, object)
+    );
+
+    if (hasObjectNearby) {
+      return stripLeadingObjectWord(
+        stripLeadingPunctuation(text.slice(genericVerbMatch.end)),
+        stripLeadingPunctuation(lower.slice(genericVerbMatch.end))
+      );
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Многозначные глаголы редактирования — сами по себе означают что угодно,
+ * поэтому засчитываем их только вместе с DRAW_OBJECTS рядом, как и
+ * DRAW_VERBS_WITH_OBJECT выше.
+ */
+const EDIT_VERBS_WITH_OBJECT = [
+  "измени",
+  "изменить",
+  "отредактируй",
+  "отредактировать",
+  "улучши",
+  "улучшить",
+  "поправь",
+  "поправить"
+];
+
+/**
+ * Достаёт инструкцию редактирования из свободной фразы — тот же подход, что
+ * extractDrawPrompt: глагол как отдельное слово плюс объект «картинку»/
+ * «фото» рядом, без обращения к LLM-роутеру.
+ * @param {string} text
+ * @param {string} lower
+ * @returns {string|null}
+ */
+function extractEditImagePrompt(text, lower) {
+  const slashCommands = [
+    "/editimage",
+    "/edit"
+  ];
+
+  for (const command of slashCommands) {
+    if (lower === command) {
+      return "";
+    }
+
+    if (lower.startsWith(`${command} `)) {
+      return text.slice(command.length).trim();
+    }
+  }
+
+  const verbMatch = findEarliestStandaloneWord(lower, EDIT_VERBS_WITH_OBJECT);
+
+  if (!verbMatch) {
+    return null;
+  }
+
+  const window = lower.slice(verbMatch.end, verbMatch.end + 30);
+  const hasObjectNearby = DRAW_OBJECTS.some(object =>
+    findStandaloneWord(window, object)
+  );
+
+  if (!hasObjectNearby) {
+    return null;
+  }
+
+  return stripLeadingObjectWord(
+    stripLeadingPunctuation(text.slice(verbMatch.end)),
+    stripLeadingPunctuation(lower.slice(verbMatch.end))
+  );
 }
 
 const AGENTS = /** @type {AgentRoles} */ ({
@@ -213,41 +405,84 @@ const AGENTS = /** @type {AgentRoles} */ ({
   architect: architect.systemPrompt
 });
 
-const HELP_TEXT = [
-  "Доступные команды:",
-  "/tools — список инструментов",
-  "/commands — список команд",
-  "/write путь | текст",
-  "/help — помощь",
-  "/agents — список агентов",
-  "/agent default — обычный агент",
-  "/coder [вопрос] — JavaScript-наставник",
-  "/architect [вопрос] — архитектор AI-агентов",
-  "/history — показать память с номерами",
-  "/forget [номер или текст] — удалить запись из памяти",
-  "/clear — очистить память",
-  "/remember — сохранить последнее сообщение пользователя в память",
-  "/context — показать историю текущего диалога",
-  "/context clear — очистить историю текущего диалога",
-  "запомни [текст] — сохранить в память",
-  "память — вывести память",
-  "calc [выражение] — калькулятор",
-  "время — текущее время",
-  "/whoami — показать Chat ID",
-  "/stats — показать статистику",
-  "/db — проверить подключение PostgreSQL",
-  "/agent — показать текущий режим агента",
-  "/weather [город] — погода в городе",
-  "/youtube [запрос] — поиск видео на YouTube",
-  "/uuid — сгенерировать UUID",
-  "/random — сгенерировать случайное число от 0 до 1",
-  "/base64 [текст] — закодировать текст в Base64",
-  "/search [запрос] — поиск в интернете",
-  "/news [тема] — последние новости",
-  "/codebase — проанализировать кодовую базу проекта",
-  "/excel — Excel/CSV: поиск, аналитика, заказ поставщику и редактирование ячеек",
-  "/draw [описание] — нарисовать картинку"
-].join("\n");
+/**
+ * Список команд одним плоским блоком читался тяжело — 34 строки подряд без
+ * разделения. Группировка по смыслу ничего не убирает и не добавляет, только
+ * упорядочивает. Обычный текст без Markdown/HTML: этот же блок идёт и в CLI,
+ * где теги вроде <b> показались бы буквально.
+ */
+const HELP_SECTIONS = [
+  {
+    title: "🤖 Агент",
+    lines: [
+      "/agents — список агентов",
+      "/agent — текущий режим",
+      "/agent default|coder|architect — сменить режим",
+      "/coder [вопрос] — разовый вопрос JavaScript-наставнику",
+      "/architect [вопрос] — разовый вопрос архитектору",
+      "/model — модель текущего режима"
+    ]
+  },
+  {
+    title: "💬 Память и диалог",
+    lines: [
+      "запомни [текст] / память — сохранить и показать память",
+      "/history — память с номерами записей",
+      "/remember — сохранить последнее сообщение",
+      "/forget [номер или текст] — удалить запись",
+      "/clear — очистить память",
+      "/context / /context clear — история текущего диалога"
+    ]
+  },
+  {
+    title: "🎨 Картинки",
+    lines: [
+      "/draw [описание] — нарисовать картинку",
+      "/editimage [что изменить] — отредактировать последнюю картинку"
+    ]
+  },
+  {
+    title: "📊 Excel/CSV",
+    lines: [
+      "/excel — справка по модулю: поиск, аналитика, заказ, редактирование"
+    ]
+  },
+  {
+    title: "🌐 Интернет",
+    lines: [
+      "/search [запрос] — поиск в интернете",
+      "/news [тема] — последние новости",
+      "/youtube [запрос] — поиск видео",
+      "/weather [город] — погода"
+    ]
+  },
+  {
+    title: "🛠 Утилиты",
+    lines: [
+      "calc [выражение] — калькулятор",
+      "время — текущее время",
+      "/uuid — сгенерировать UUID",
+      "/random — случайное число от 0 до 1",
+      "/base64 [текст] — закодировать в Base64",
+      "/write путь | текст — записать файл проекта"
+    ]
+  },
+  {
+    title: "ℹ️ Информация",
+    lines: [
+      "/tools — список инструментов",
+      "/commands / /help — этот список",
+      "/whoami — Chat ID",
+      "/stats — статистика чата",
+      "/db — статус подключения PostgreSQL",
+      "/codebase — анализ кодовой базы проекта"
+    ]
+  }
+];
+
+const HELP_TEXT = HELP_SECTIONS
+  .map(section => `${section.title}\n${section.lines.join("\n")}`)
+  .join("\n\n");
 
 class Agent {
   /**
@@ -259,6 +494,8 @@ constructor(chatId = "default") {
   this.conversationHistory = [];
   this.currentAgent = "default";
   // currentAgent — текущий режим агента
+  /** Путь к последней картинке этого чата — цель для «измени картинку». */
+  this.lastImagePath = null;
 }  /**
    * @returns {string}
    */
@@ -482,7 +719,13 @@ if (lower === "/agent") {
 const drawPrompt = extractDrawPrompt(text, lower);
 
 if (drawPrompt !== null) {
-  return await tools.draw.run(drawPrompt);
+  return await this.drawNewImage(drawPrompt);
+}
+
+const editImagePrompt = extractEditImagePrompt(text, lower);
+
+if (editImagePrompt !== null) {
+  return await this.editLastImage(editImagePrompt);
 }
 
 if (shouldAnalyzeCodebase(lower)) {
@@ -655,6 +898,13 @@ if (lower.startsWith("/write ")) {
 
 const route = await chooseTool(text);
     console.log("ROUTER:", route);
+
+    if (route?.tool === "draw") {
+      if (isDrawingDiscussion(lower)) {
+        return await this.askAi(text, lower);
+      }
+      return await this.drawNewImage(route.input || text);
+    }
 
     if (route && route.tool && route.tool !== "none") {
       const tool = tools[route.tool];
@@ -850,6 +1100,85 @@ async search(query) {
     });
 
     return answer;
+  }
+
+  /**
+   * Веб-поиск с разбором через Ranker/Analyzer — тот же двухшаговый конвейер,
+   * что webReader уже использует (сырой результат инструмента → LLM убирает
+   * мусор и выбирает главное). У search() выше этого шага нет: он отдаёт
+   * сырой форматированный ответ Tavily как есть.
+   * @param {string} query
+   * @param {(stage: "search"|"analyze") => void|Promise<void>} [onProgress]
+   * @returns {Promise<string>}
+   */
+  async webSearchWithAnalysis(query, onProgress) {
+    if (!query) {
+      return "Напиши запрос.";
+    }
+
+    if (onProgress) {
+      await onProgress("search");
+    }
+
+    const rawResult = await searchWeb(query);
+
+    if (onProgress) {
+      await onProgress("analyze");
+    }
+
+    const answer = await analyzeResults(query, "search", rawResult);
+
+    this.conversationHistory.push({
+      role: "user",
+      content: `/search ${query}`
+    });
+
+    this.conversationHistory.push({
+      role: "assistant",
+      content: answer
+    });
+
+    return answer;
+  }
+
+  /**
+   * Рисует картинку с нуля и запоминает файл как «последнюю картинку» этого
+   * чата — на неё будет ссылаться следующая просьба отредактировать.
+   * @param {string} prompt
+   * @returns {Promise<string>}
+   */
+  async drawNewImage(prompt) {
+    const result = await drawImage(prompt);
+
+    if (result.ok && result.filePath) {
+      this.lastImagePath = result.filePath;
+    }
+
+    return formatImageResult(result);
+  }
+
+  /**
+   * Редактирует последнюю нарисованную в этом чате картинку. Источник —
+   * файл из exports/, а не Telegram-ссылка: для картинок, на которые
+   * человек отвечает реплаем в самом Telegram, есть отдельный путь в
+   * telegram.js (там источник — скачанное фото, а не то, что нарисовал бот).
+   * @param {string} instruction
+   * @returns {Promise<string>}
+   */
+  async editLastImage(instruction) {
+    if (!this.lastImagePath || !fs.existsSync(this.lastImagePath)) {
+      return "Сначала нарисуй картинку — редактировать пока нечего.";
+    }
+
+    const imageBuffer = fs.readFileSync(this.lastImagePath);
+    const mimeType = `image/${path.extname(this.lastImagePath).slice(1) || "png"}`;
+    const result = await editImage(instruction, imageBuffer, mimeType);
+
+    if (result.ok && result.filePath) {
+      this.lastImagePath = result.filePath;
+    }
+
+    return formatImageResult(result);
   }
 
   /**

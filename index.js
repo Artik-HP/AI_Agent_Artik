@@ -12,19 +12,6 @@ import {
 } from "./src/database.js";
 import { installCrashHandlers, logError, logInfo } from "./src/utils/logger.js";
 
-import express from "express";
-
-const app = express();
-
-const PORT = Number.parseInt(process.env.PORT ?? "3000", 10);
-
-app.get("/", (req, res) => {
-  res.send("AI Agent Artik is alive 🚀");
-});
-
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`Server running on port ${PORT}`);
-});
 // Ставим до всего остального: падение на старте тоже должно оставить след.
 installCrashHandlers();
 
