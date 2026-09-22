@@ -8,6 +8,7 @@ import {
   detectAudioFormat,
   transcribeAudio
 } from "./tools/speech.js";
+import { editImage, formatImageResult } from "./tools/drawImage.js";
 import { splitMessage }
   from "./utils/splitMessage.js";
 import { logError, logInfo } from "./utils/logger.js";
@@ -228,7 +229,10 @@ const MAIN_KEYBOARD = Markup.keyboard([
     "Агент: architect"
   ],
   [
-    "Нарисовать картинку",
+    "🌐 Веб-поиск",
+    "Нарисовать картинку"
+  ],
+  [
     "Команды"
   ]
 ]).resize();
@@ -237,9 +241,52 @@ const BUTTON_COMMANDS = new Map([
   ["Агент: default", "/agent default"],
   ["Агент: coder", "/agent coder"],
   ["Агент: architect", "/agent architect"],
+  ["🌐 Веб-поиск", "/websearch"],
   ["Нарисовать картинку", "/draw"],
   ["Команды", "/commands"]
 ]);
+
+/** Префикс callback_data кнопок-примеров веб-поиска. */
+const WEBSEARCH_PREFIX = "ws:";
+
+/**
+ * Примеры запросов в меню веб-поиска — показывают, что можно спросить,
+ * не заставляя придумывать формулировку с нуля.
+ * @type {{ id: string, label: string, query: string }[]}
+ */
+const WEBSEARCH_EXAMPLES = [
+  {
+    id: "mcp",
+    label: "Что такое MCP?",
+    query: "Что такое MCP?"
+  },
+  {
+    id: "openai_news",
+    label: "Последние новости OpenAI",
+    query: "Последние новости OpenAI"
+  }
+];
+
+/**
+ * @returns {ReturnType<typeof Markup.inlineKeyboard>}
+ */
+function webSearchKeyboard() {
+  return Markup.inlineKeyboard(
+    WEBSEARCH_EXAMPLES.map(example => [
+      Markup.button.callback(example.label, WEBSEARCH_PREFIX + example.id)
+    ])
+  );
+}
+
+/**
+ * Подписи стадий прогресса веб-поиска — их видит пользователь, пока
+ * progress-сообщение редактируется через ctx.telegram.editMessageText.
+ * @type {Record<"search"|"analyze", string>}
+ */
+const WEBSEARCH_STAGE_LABELS = {
+  search: "🔎 Ищу в интернете...",
+  analyze: "🧠 Анализирую результаты..."
+};
 
 /**
  * Меню команд Telegram — выпадающий список по кнопке «/» в поле ввода.
@@ -260,7 +307,9 @@ const BOT_COMMANDS = [
   { command: "architect", description: "Архитектор AI-агентов" },
   { command: "excel", description: "Excel/CSV: поиск, аналитика, заказ поставщику" },
   { command: "draw", description: "Нарисовать картинку по описанию" },
+  { command: "editimage", description: "Отредактировать последнюю картинку" },
   { command: "search", description: "Поиск в интернете" },
+  { command: "websearch", description: "Веб-поиск с примерами и стадиями" },
   { command: "news", description: "Последние новости по теме" },
   { command: "weather", description: "Погода в городе" },
   { command: "youtube", description: "Поиск видео на YouTube" },
@@ -317,27 +366,30 @@ function normalizeTelegramText(text) {
 }
 
 /**
+ * Картинку теперь рисует OpenRouter и отдаёт её как base64 — drawImage.js
+ * decode-ит и сохраняет файл в exports/, а сюда прилетает готовый путь той
+ * же сентинел-строкой, что Excel использует для документов ("Excel-файл:").
  * @param {string} answer
- * @returns {{url: string, caption: string}|null}
+ * @returns {{filePath: string, caption: string}|null}
  */
 function getImageReply(answer) {
-  const match = answer.match(
-    /^Картинка готова:\n(https:\/\/image\.pollinations\.ai\/\S+)/m
-  );
+  const match = answer.match(/^Картинка-файл:\n(.+)$/m);
 
   if (!match) {
     return null;
   }
 
-  const promptMatch = answer.match(/\nПромпт: ([\s\S]+)$/);
-  const prompt = String(promptMatch?.[1] || "").trim();
-  const caption = prompt
-    ? `Картинка готова.\nПромпт: ${prompt.slice(0, 900)}`
-    : "Картинка готова.";
+  const filePath = path.resolve(String(match[1]).trim());
+
+  if (!fs.existsSync(filePath)) {
+    return null;
+  }
 
   return {
-    url: match[1],
-    caption
+    filePath,
+    caption: answer
+      .replace(/^Картинка-файл:\n.+$/m, "Картинка готова.")
+      .slice(0, 1000)
   };
 }
 
@@ -455,7 +507,9 @@ async function replyAgentAnswer(ctx, answer) {
 
   try {
     await ctx.replyWithPhoto(
-      imageReply.url,
+      {
+        source: imageReply.filePath
+      },
       {
         caption: imageReply.caption,
         ...MAIN_KEYBOARD
@@ -496,6 +550,30 @@ async function handleTextMessage(ctx) {
   const userText = normalizeTelegramText((ctx.message && 'text' in ctx.message ? ctx.message.text : undefined) ?? "");
 
   try {
+    const replyToPhoto = ctx.message && "reply_to_message" in ctx.message
+      ? ctx.message.reply_to_message?.photo
+      : undefined;
+
+    // Ответ на фото инструкцией — редактирование, а не обычный чат.
+    // Слэш-команды в реплае (мало ли человек ответил на фото "/help")
+    // пропускаем дальше, к обычной обработке команд.
+    if (replyToPhoto && replyToPhoto.length > 0 && userText.trim() && !userText.trim().startsWith("/")) {
+      await handleImageEditReply(ctx, replyToPhoto, userText.trim());
+      return;
+    }
+
+    if (userText.trim().toLowerCase() === "/websearch") {
+      await ctx.reply(
+        [
+          "🌐 Веб-поиск: ищу в интернете и разбираю ответ через анализатор.",
+          "",
+          "Выбери пример — покажу стадии поиска прямо в этом чате."
+        ].join("\n"),
+        webSearchKeyboard()
+      );
+      return;
+    }
+
     if (userText.trim().toLowerCase() === "/справка") {
       if (!fs.existsSync(GUIDE_FILE_PATH)) {
         await ctx.reply("Файл справки не найден. Проверь: " + GUIDE_FILE_PATH);
@@ -509,11 +587,46 @@ async function handleTextMessage(ctx) {
       return;
     }
 
+    // «печатает…» на весь Bot API живёт секунд пять — на длинных операциях
+    // (Excel, рисование) индикатор погаснет раньше ответа. Это лучше, чем
+    // ничего: первые секунды ожидания перестают выглядеть как зависание.
+    await ctx.sendChatAction("typing").catch(() => {});
+
     const agent = getAgent(chatId);
     const answer = await agent.process(userText);
 
     console.log("ANSWER LENGTH:", answer.length);
     await replyAgentAnswer(ctx, answer);
+  } catch (error) {
+    await handleTelegramError(ctx, error);
+  }
+}
+
+/**
+ * Редактирует картинку, на которую ответил пользователь: берёт самый
+ * большой размер фото, скачивает его байты у Telegram и отправляет модели
+ * вместе с текстом инструкции. Работает для любой картинки в чате, не
+ * только сгенерированной ботом — источник тут просто буфер байт.
+ * @param {import("telegraf").Context} ctx
+ * @param {Array<{ file_id: string }>} photoSizes
+ * @param {string} instruction
+ */
+async function handleImageEditReply(ctx, photoSizes, instruction) {
+  const chatId = ctx.chat?.id;
+
+  try {
+    await ctx.sendChatAction("upload_photo").catch(() => {});
+
+    const largestPhoto = photoSizes[photoSizes.length - 1];
+    const imageBuffer = await downloadTelegramFile(largestPhoto.file_id, ctx);
+
+    const result = await editImage(instruction, imageBuffer, "image/jpeg");
+
+    if (result.ok && result.filePath) {
+      getAgent(chatId).lastImagePath = result.filePath;
+    }
+
+    await replyAgentAnswer(ctx, formatImageResult(result));
   } catch (error) {
     await handleTelegramError(ctx, error);
   }
@@ -728,6 +841,79 @@ async function handleCriteriaPresetAction(ctx) {
 }
 
 /**
+ * Выполняет веб-поиск с индикатором стадий: одно сообщение бот редактирует
+ * через «Поиск в интернете» → «Анализ» → финальный ответ, вместо трёх
+ * отдельных сообщений, которые засоряют чат.
+ * @param {import("telegraf").Context} ctx
+ * @param {string | number | undefined} chatId
+ * @param {string} query
+ */
+async function runWebSearchWithProgress(ctx, chatId, query) {
+  const progressMessage = await ctx.reply(`🔎 Ищу: «${query}»...`);
+
+  const editProgress = async text => {
+    try {
+      await ctx.telegram.editMessageText(
+        ctx.chat.id,
+        progressMessage.message_id,
+        undefined,
+        text
+      );
+    } catch (error) {
+      // "message is not modified" — стадия наступила раньше, чем успело
+      // прийти обновление, текст уже совпадает. Не повод ронять поиск.
+      const message = error instanceof Error ? error.message : String(error);
+
+      if (!message.includes("message is not modified")) {
+        throw error;
+      }
+    }
+  };
+
+  try {
+    const agent = getAgent(chatId);
+    const answer = await agent.webSearchWithAnalysis(
+      query,
+      stage => editProgress(WEBSEARCH_STAGE_LABELS[stage])
+    );
+
+    const parts = splitMessage(answer, 3900);
+
+    await editProgress(parts[0]);
+
+    for (const part of parts.slice(1)) {
+      await ctx.reply(part);
+    }
+  } catch (error) {
+    await handleTelegramError(ctx, error);
+  }
+}
+
+/**
+ * Кнопка примера из меню веб-поиска: запускает поиск с индикатором стадий.
+ * @param {import("telegraf").Context} ctx
+ */
+async function handleWebSearchExampleAction(ctx) {
+  const chatId = ctx.chat?.id;
+  const id = String(
+    (ctx.match && Array.isArray(ctx.match) ? ctx.match[1] : undefined) || ""
+  );
+  const example = WEBSEARCH_EXAMPLES.find(item => item.id === id);
+
+  try {
+    if (!example) {
+      await ctx.answerCbQuery("Такой кнопки больше нет — открой меню заново.");
+      return;
+    }
+
+    await ctx.answerCbQuery(`Ищу: ${example.label}`);
+    await runWebSearchWithProgress(ctx, chatId, example.query);
+  } catch (error) {
+    await handleTelegramError(ctx, error);
+  }
+}
+
+/**
  * @param {import("telegraf").Context} ctx
  * @param {unknown} error
  */
@@ -790,13 +976,32 @@ export async function startTelegramBot() {
 
   bot.start(ctx => {
     return ctx.reply(
-      "Привет! Я AI_Agent_JS 🤖\nВыбери агента, открой команды или попроси нарисовать картинку.",
-      MAIN_KEYBOARD
+      [
+        "<b>Привет! Я AI Agent Artik 🤖</b>",
+        "",
+        "Персональный AI-агент: обычный чат с памятью, Excel/CSV-аналитика, " +
+          "веб-поиск с разбором ответа и рисование/редактирование картинок — " +
+          "всё в одном Telegram-боте.",
+        "",
+        "<b>Быстрый старт:</b>",
+        "🎨 «нарисуй дракона в горах» — сгенерирую картинку; ответь на неё " +
+          "текстом, чтобы поправить результат",
+        "🌐 кнопка «Веб-поиск» ниже — поиск в интернете с разбором ответа",
+        "📊 пришли Excel/CSV-файл — открою меню отчётов и заказа поставщику",
+        "💬 всё остальное — обычный вопрос, отвечу как ассистент",
+        "",
+        "/commands — полный список команд"
+      ].join("\n"),
+      {
+        parse_mode: "HTML",
+        ...MAIN_KEYBOARD
+      }
     );
   });
 
   bot.action(new RegExp(`^${CRITERIA_PREFIX}(.+)$`), handleCriteriaPresetAction);
   bot.action(new RegExp(`^${EXCEL_PREFIX}(.+)$`), handleExcelAction);
+  bot.action(new RegExp(`^${WEBSEARCH_PREFIX}(.+)$`), handleWebSearchExampleAction);
   bot.on("text", handleTextMessage);
   bot.on("voice", handleSpeechMessage);
   bot.on("audio", handleSpeechMessage);

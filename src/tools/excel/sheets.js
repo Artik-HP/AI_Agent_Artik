@@ -434,7 +434,11 @@ function listSheetsOnly(file, fullPath, files, empty) {
 export async function manageSheets(input) {
   const request = normalizeInput(input);
   const operations = parseSheetOperations(request.query);
-  const files = resolveFiles(request);
+  // Память хранит загрузки от старых к новым; явные пути остаются первыми.
+  const files = resolveFiles({
+    ...request,
+    memories: [...request.memories].reverse()
+  });
 
   /** @type {SheetsResult} */
   const empty = {

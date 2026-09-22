@@ -218,6 +218,7 @@ function extractSearchQuery(query) {
       /^(?:поиск|пошук|найди|найти|знайди|шукай|search|find)(?=[\s:,]|$)\s*/i,
       ""
     )
+    .replace(/\s+в\s+(?:таблице|таблицах|книге)\s*[.!?]?\s*$/i, "")
     .replace(/\s+/g, " ")
     .trim();
 }

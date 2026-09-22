@@ -1,34 +1,19 @@
-const DEFAULT_IMAGE_MODEL = "flux";
-const DEFAULT_IMAGE_WIDTH = 1024;
-const DEFAULT_IMAGE_HEIGHT = 1024;
-const MIN_IMAGE_SIZE = 256;
-const MAX_IMAGE_SIZE = 2048;
+import fs from "node:fs";
+import path from "node:path";
+import { randomUUID } from "node:crypto";
+
+import { askModelForImage } from "../model.js";
+
+/** Каталог, куда сохраняются сгенерированные и отредактированные картинки. */
+const OUTPUT_DIR = "exports";
 
 /**
  * @typedef {Object} ImageResult
  * @property {boolean} ok
  * @property {string} prompt
- * @property {string} [url]
+ * @property {string} [filePath]
  * @property {string} [message]
  */
-
-/**
- * @param {string|undefined} value
- * @param {number} fallback
- * @returns {number}
- */
-function readImageSize(value, fallback) {
-  const parsed = Number.parseInt(String(value || ""), 10);
-
-  if (!Number.isFinite(parsed)) {
-    return fallback;
-  }
-
-  return Math.min(
-    MAX_IMAGE_SIZE,
-    Math.max(MIN_IMAGE_SIZE, parsed)
-  );
-}
 
 /**
  * @param {string|undefined} input
@@ -42,33 +27,49 @@ export function normalizeImagePrompt(input) {
 }
 
 /**
- * @param {string} prompt
+ * @param {Date} [date]
  * @returns {string}
  */
-export function buildImageUrl(prompt) {
-  const width = readImageSize(
-    process.env.IMAGE_WIDTH,
-    DEFAULT_IMAGE_WIDTH
-  );
-  const height = readImageSize(
-    process.env.IMAGE_HEIGHT,
-    DEFAULT_IMAGE_HEIGHT
-  );
-  const model =
-    process.env.IMAGE_MODEL ||
-    DEFAULT_IMAGE_MODEL;
-
-  const params = new URLSearchParams({
-    width: String(width),
-    height: String(height),
-    model,
-    nologo: "true"
-  });
-
-  return `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?${params.toString()}`;
+function createTimestamp(date = new Date()) {
+  return date
+    .toISOString()
+    .replace(/[-:]/g, "")
+    .replace(/\..+$/, "")
+    .replace("T", "-");
 }
 
 /**
+ * Достаёт первую картинку из ответа модели и сохраняет её в exports/.
+ * OpenRouter отдаёт картинку как data-URL (`data:image/png;base64,...`) в
+ * message.images — не готовый файл и не постоянная ссылка, поэтому её нужно
+ * декодировать и сохранить самим, иначе следующий шаг (отправка в Telegram,
+ * повторное редактирование) нечего будет прочитать.
+ * @param {import("../model.js").ImageResponseMessage} message
+ * @param {string} filePrefix
+ * @returns {string}
+ */
+function saveFirstImage(message, filePrefix) {
+  const dataUrl = message.images?.[0]?.image_url?.url || "";
+  const match = dataUrl.match(/^data:image\/(\w+);base64,(.+)$/);
+
+  if (!match) {
+    throw new Error("Модель не вернула картинку.");
+  }
+
+  const [, extension, base64Data] = match;
+  const fileName = `${filePrefix}-${createTimestamp()}-${randomUUID()}.${extension}`;
+  const filePath = path.join(OUTPUT_DIR, fileName);
+
+  fs.mkdirSync(OUTPUT_DIR, {
+    recursive: true
+  });
+  fs.writeFileSync(filePath, Buffer.from(base64Data, "base64"), { flag: "wx" });
+
+  return filePath;
+}
+
+/**
+ * Рисует картинку с нуля по текстовому описанию.
  * @param {string|undefined} input
  * @returns {Promise<ImageResult>}
  */
@@ -83,10 +84,75 @@ export async function drawImage(input) {
     };
   }
 
+  const message = await askModelForImage([
+    {
+      role: "user",
+      content: prompt
+    }
+  ]);
+
   return {
     ok: true,
     prompt,
-    url: buildImageUrl(prompt)
+    filePath: saveFirstImage(message, "image")
+  };
+}
+
+/**
+ * Редактирует уже готовую картинку по текстовой инструкции — отправляет её
+ * модели вместе с описанием изменений и сохраняет результат как новый файл
+ * (исходный не трогаем, как и остальные экспорты проекта). Источник картинки
+ * — просто буфер байт, поэтому вызывающая сторона сама решает, откуда его
+ * взять: файл из exports/ (последняя нарисованная ботом картинка) или
+ * скачанное фото из Telegram (любая картинка, на которую ответил человек).
+ * @param {string|undefined} instruction
+ * @param {Buffer|undefined} imageBuffer
+ * @param {string} [mimeType]
+ * @returns {Promise<ImageResult>}
+ */
+export async function editImage(instruction, imageBuffer, mimeType = "image/png") {
+  const prompt = normalizeImagePrompt(instruction);
+
+  if (!prompt) {
+    return {
+      ok: false,
+      prompt: "",
+      message: "Напиши, что изменить. Например: измени картинку: добавь закат"
+    };
+  }
+
+  if (!imageBuffer || imageBuffer.length === 0) {
+    return {
+      ok: false,
+      prompt,
+      message: "Сначала нарисуй картинку — редактировать пока нечего."
+    };
+  }
+
+  const base64Source = imageBuffer.toString("base64");
+
+  const message = await askModelForImage([
+    {
+      role: "user",
+      content: [
+        {
+          type: "text",
+          text: prompt
+        },
+        {
+          type: "image_url",
+          image_url: {
+            url: `data:${mimeType};base64,${base64Source}`
+          }
+        }
+      ]
+    }
+  ]);
+
+  return {
+    ok: true,
+    prompt,
+    filePath: saveFirstImage(message, "image-edit")
   };
 }
 
@@ -100,10 +166,12 @@ export function formatImageResult(result) {
   }
 
   return [
-    "Картинка готова:",
-    result.url,
+    "Картинка-файл:",
+    result.filePath,
     "",
-    `Промпт: ${result.prompt}`
+    `Промпт: ${result.prompt}`,
+    "",
+    "Изменить: «измени картинку: ...», /editimage ... или ответь на фото текстом."
   ].join("\n");
 }
 

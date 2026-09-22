@@ -152,12 +152,27 @@ test("agent exposes image drawing tool", async () => {
   );
 });
 
-test("agent creates image generation links", async () => {
+test("agent creates image generation files", async t => {
+  const previousKey = process.env.OPENROUTER_API_KEY;
+  process.env.OPENROUTER_API_KEY = "test-key";
+  t.after(() => {
+    if (previousKey === undefined) delete process.env.OPENROUTER_API_KEY;
+    else process.env.OPENROUTER_API_KEY = previousKey;
+  });
+  t.mock.method(globalThis, "fetch", async () => ({
+    ok: true,
+    json: async () => ({ choices: [{ message: {
+      images: [{ image_url: { url: "data:image/png;base64,dGVzdA==" } }]
+    } }] })
+  }));
   const agent = new Agent();
+  t.after(() => {
+    if (agent.lastImagePath) fs.unlinkSync(agent.lastImagePath);
+  });
   const answer = await agent.process("/draw neon cat");
 
-  assert.match(answer, /Картинка готова:/);
-  assert.match(answer, /https:\/\/image\.pollinations\.ai\/prompt\/neon%20cat/);
+  assert.match(answer, /Картинка-файл:/);
+  assert.match(answer, /exports[\\/]image-.+\.\w+/);
 });
 
 test("agent switches back to default mode", async () => {
