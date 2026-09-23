@@ -327,7 +327,7 @@ function shouldReportDeadStock(lower) {
  * @param {string} lower
  * @returns {boolean}
  */
-function shouldEditExcel(lower) {
+export function shouldEditExcel(lower) {
   return (
     /измени|поменяй|исправь|обнови|замени/i.test(lower) &&
     /артикул|excel|csv|таблиц|файл|ячейк|штрихкод|sku/i.test(lower)
