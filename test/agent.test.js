@@ -11,6 +11,7 @@ import * as projects from "../src/projects.js";
 import {
   CRITERIA_PRESETS,
   EXCEL_ACTIONS,
+  resolveWebAppUrl,
   sanitizeFileName
 } from "../src/telegram.js";
 import {
@@ -941,6 +942,30 @@ test("каждая кнопка Excel-меню доходит до Excel-инс�
   // Условия переноса — второй уровень того же меню.
   assert.ok(EXCEL_ACTIONS.some(action => action.menu === "criteria"));
   assert.ok(CRITERIA_PRESETS.length > 0);
+});
+
+test("resolveWebAppUrl picks WEB_APP_URL over RENDER_EXTERNAL_URL and trims a trailing slash", () => {
+  const saved = {
+    WEB_APP_URL: process.env.WEB_APP_URL,
+    RENDER_EXTERNAL_URL: process.env.RENDER_EXTERNAL_URL
+  };
+
+  try {
+    delete process.env.WEB_APP_URL;
+    delete process.env.RENDER_EXTERNAL_URL;
+    assert.equal(resolveWebAppUrl(), null);
+
+    process.env.RENDER_EXTERNAL_URL = "https://ai-agent-artik.onrender.com/";
+    assert.equal(resolveWebAppUrl(), "https://ai-agent-artik.onrender.com");
+
+    process.env.WEB_APP_URL = "https://custom.example.com";
+    assert.equal(resolveWebAppUrl(), "https://custom.example.com");
+  } finally {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
 });
 
 test("маршрут переноса задаётся списками и исключениями", () => {

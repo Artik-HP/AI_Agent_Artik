@@ -235,7 +235,8 @@ const MAIN_KEYBOARD = Markup.keyboard([
     "Нарисовать картинку"
   ],
   [
-    "Команды"
+    "Команды",
+    "🖥 Веб-версия"
   ]
 ]).resize();
 
@@ -245,8 +246,22 @@ const BUTTON_COMMANDS = new Map([
   ["Агент: architect", "/agent architect"],
   ["🌐 Веб-поиск", "/websearch"],
   ["Нарисовать картинку", "/draw"],
-  ["Команды", "/commands"]
+  ["Команды", "/commands"],
+  ["🖥 Веб-версия", "/webapp"]
 ]);
+
+/**
+ * Публичный адрес веб-интерфейса для кнопки в Telegram. `WEB_APP_URL` —
+ * явная настройка; `RENDER_EXTERNAL_URL` Render подставляет сам для любого
+ * web-сервиса, отдельно указывать на Render ничего не нужно. Без ни одной
+ * из них показать рабочую ссылку нечем — localhost с телефона не откроется.
+ * @returns {string|null}
+ */
+export function resolveWebAppUrl() {
+  const url = process.env.WEB_APP_URL || process.env.RENDER_EXTERNAL_URL;
+
+  return url ? url.trim().replace(/\/+$/, "") : null;
+}
 
 /** Префикс callback_data кнопок-примеров веб-поиска. */
 const WEBSEARCH_PREFIX = "ws:";
@@ -492,6 +507,29 @@ async function handleTextMessage(ctx) {
     // пропускаем дальше, к обычной обработке команд.
     if (replyToPhoto && replyToPhoto.length > 0 && userText.trim() && !userText.trim().startsWith("/")) {
       await handleImageEditReply(ctx, replyToPhoto, userText.trim());
+      return;
+    }
+
+    if (userText.trim().toLowerCase() === "/webapp") {
+      const webAppUrl = resolveWebAppUrl();
+
+      if (!webAppUrl) {
+        await ctx.reply(
+          [
+            "Веб-интерфейс задеплоен, но я не знаю его публичный адрес.",
+            "Задай переменную окружения WEB_APP_URL — и кнопка заработает.",
+            "На Render она обычно не нужна: адрес там подставляется сам (RENDER_EXTERNAL_URL)."
+          ].join("\n")
+        );
+        return;
+      }
+
+      await ctx.reply(
+        "🖥 Тот же агент, что и здесь, но в браузере — чат, кнопки быстрых действий, загрузка и скачивание Excel-файлов.",
+        Markup.inlineKeyboard([
+          Markup.button.url("Открыть веб-интерфейс", webAppUrl)
+        ])
+      );
       return;
     }
 
@@ -921,6 +959,7 @@ export async function startTelegramBot() {
           "текстом, чтобы поправить результат",
         "🌐 кнопка «Веб-поиск» ниже — поиск в интернете с разбором ответа",
         "📊 пришли Excel/CSV-файл — открою меню отчётов и заказа поставщику",
+        "🖥 кнопка «Веб-версия» ниже — тот же агент в браузере",
         "💬 всё остальное — обычный вопрос, отвечу как ассистент",
         "",
         "/commands — полный список команд"
