@@ -13,6 +13,7 @@ import { analyzeCodebase } from "./codeAnalyzer.js";
 import webReader from "./webReader.js";
 import drawImage from "./drawImage.js";
 import excelTool from "./excel/excelTool.js";
+import projectManager from "./projectManager.js";
 
 
 
@@ -102,6 +103,11 @@ draw: {
 excel: {
   description: "Работает с Excel/CSV: поиск, аналитика, заказ поставщику и замовлення Т1",
   run: async input => excelTool.run(input)
+},
+
+projects: {
+  description: "Запоминает проекты: название, стек, задачи, статус",
+  run: async input => projectManager.run(input)
 },
 };
 

@@ -17,6 +17,7 @@ import { askModel } from "./model.js";
 import { describeRunningCode } from "./version.js";
 import { getDatabaseStatus } from "./database.js";
 import { hasSheetIntent } from "./tools/excel/sheets.js";
+import { shouldEditExcel } from "./tools/excel/excelTool.js";
 import { drawImage, editImage, formatImageResult } from "./tools/drawImage.js";
 const MODELS = {
   default: process.env.MODEL_DEFAULT,
@@ -74,19 +75,6 @@ function shouldAnalyzeCodebase(lower) {
     lower.includes("проанализируй кодовую базу") ||
     lower.includes("ревью проекта") ||
     lower.includes("найди ошибки в проекте")
-  );
-}
-
-/**
- * Ловит намерение "изменить/поменять/исправить" что-то в Excel/CSV-файле —
- * заказ на редактирование ячеек, а не генерацию нового отчёта.
- * @param {string} lower
- * @returns {boolean}
- */
-function shouldEditExcel(lower) {
-  return (
-    /измени|поменяй|исправь|обнови|замени/.test(lower) &&
-    /артикул|excel|csv|таблиц|файл|ячейк|штрихкод|sku/.test(lower)
   );
 }
 
@@ -162,6 +150,44 @@ export function shouldUseExcelTool(lower) {
       )
     )
   );
+}
+
+/**
+ * Осторожно с «проект»: слово частое и в обычной речи («обсудим мой
+ * проект»). Ловим только команды — явные /project(s) и фразы, которые
+ * начинаются с «проект»/«покажи проект», а не любое упоминание где-то в
+ * середине сообщения.
+ * @param {string} lower
+ * @returns {boolean}
+ */
+export function shouldUseProjectManager(lower) {
+  if (
+    lower === "/project" || lower.startsWith("/project ") ||
+    lower === "/projects" || lower.startsWith("/projects")
+  ) {
+    return true;
+  }
+
+  if (
+    lower.includes("покажи проекты") ||
+    lower.includes("мои проекты") ||
+    lower.includes("список проектов") ||
+    lower.includes("все проекты")
+  ) {
+    return true;
+  }
+
+  if (/(?:созда[йть]+|нов(?:ый|ая))\s+проект\s+\S/u.test(lower)) {
+    return true;
+  }
+
+  if (/удали(?:ть)?\s+проект\s+\S/u.test(lower)) {
+    return true;
+  }
+
+  // «проект <название>» и «покажи проект <название>» — команда должна
+  // начинаться с этих слов целиком, а не встречаться где-то в фразе.
+  return /^(?:покажи\s+)?проект\s+\S/u.test(lower);
 }
 
 /** Однозначные глаголы рисования — объект («картинку») после них не нужен. */
@@ -432,6 +458,19 @@ const HELP_SECTIONS = [
       "/forget [номер или текст] — удалить запись",
       "/clear — очистить память",
       "/context / /context clear — история текущего диалога"
+    ]
+  },
+  {
+    title: "📁 Проекты",
+    lines: [
+      "/projects — список проектов",
+      "создай проект [название] — завести проект",
+      "проект [название] — карточка проекта",
+      "проект [название] стек: ... — задать стек",
+      "проект [название] статус: ... — задать статус",
+      "проект [название] задача: ... — добавить задачу",
+      "проект [название] готово: ... — отметить задачу",
+      "удали проект [название] — удалить проект"
     ]
   },
   {
@@ -754,6 +793,13 @@ if (shouldUseExcelTool(lower)) {
   }));
 }
 
+if (shouldUseProjectManager(lower)) {
+  return String(await tools.projects.run({
+    query: text,
+    chatId: this.chatId
+  }));
+}
+
 if (lower.startsWith("/agent ")) {
   const mode = text.replace("/agent", "").trim().toLowerCase();
 
@@ -913,19 +959,26 @@ const route = await chooseTool(text);
         return `Инструмент "${route.tool}" не найден.`;
       }
 
-const toolInput = route.tool === "excel"
-  ? {
+let toolInput = route.input;
+
+if (route.tool === "excel") {
+  toolInput = {
     query: route.input || text,
     memories: await memory.getAll(this.chatId),
     chatId: this.chatId
-  }
-  : route.input;
+  };
+} else if (route.tool === "projects") {
+  toolInput = {
+    query: route.input || text,
+    chatId: this.chatId
+  };
+}
 const toolResult = await tool.run(toolInput);
 console.log("TOOL:", route.tool);
 console.log("INPUT:", toolInput);
 console.log("RESULT:", String(toolResult).slice(0, 500));
 
-if (route.tool === "draw" || route.tool === "excel") {
+if (route.tool === "draw" || route.tool === "excel" || route.tool === "projects") {
   return String(toolResult);
 }
 
