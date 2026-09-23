@@ -102,22 +102,3 @@ const result = Function(
     return "Не смог посчитать выражение.";
   }
 }
-
-/**
- * Данные о погоде для города.
- * @typedef {Object} WeatherData
- * @property {string} city Название города
- * @property {string} condition Текущее состояние погоды
- * @property {number} temperature Температура
- * @property {string} unit Единица измерения температуры
- */
-
-/**
- * Возвращает данные о погоде для города.
- * @param {string} city
- * @returns {WeatherData}q
- */
-export function weather(city) {
-  void city;
-  throw new Error("Function not implemented.");
-}

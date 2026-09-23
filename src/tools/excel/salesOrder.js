@@ -726,19 +726,76 @@ function readReportSheet(sheet, options, sheetPoint) {
 
 /**
  * Один и тот же артикул на нескольких точках — это один товар в разных
- * магазинах. Сейчас каждая точка остаётся отдельной строкой заказа.
- *
- * Стало заметнее, чем раньше: заказ теперь состоит из презервативов и
- * лубрикантов, а они лежат во всех четырнадцати магазинах, и выгрузка «все
- * магазины» разом даёт по строке на магазин. Поставщику уходит одна поставка —
- * значит, вопрос «одна строка на артикул или строка на магазин» решает, как
- * читается готовый файл.
+ * магазинах. Поставщику уходит одна поставка, поэтому строки одного артикула
+ * с разных точек склеиваются в одну: суммируемые величины (остатки, приход,
+ * расход, продажи) складываются, а turnover/stockDays/sellThrough и заказ
+ * пересчитываются заново по сумме — усреднять готовые проценты между точками
+ * нельзя, это даёт другое число, чем «сколько всего продали от того, что было».
+ * `point` сохраняет все точки через запятую — это единственное место, где
+ * видно, что строка объединённая.
  * @param {SalesOrderLine[]} lines
+ * @param {SalesOrderOptions} options
  * @returns {SalesOrderLine[]}
  */
-function combineSheetLines(lines) {
-  // TODO(human): решить, склеивать ли строки одного артикула с разных точек.
-  return lines;
+function combineSheetLines(lines, options) {
+  /** @type {Map<string, SalesOrderLine[]>} */
+  const groups = new Map();
+
+  for (const line of lines) {
+    const key = line.sku.trim().toUpperCase();
+
+    if (!groups.has(key)) {
+      groups.set(key, []);
+    }
+
+    groups.get(key).push(line);
+  }
+
+  return [...groups.values()].map(group => {
+    if (group.length === 1) {
+      return group[0];
+    }
+
+    const sum = field =>
+      group.reduce((total, line) => total + (line[field] || 0), 0);
+    // Продажи бывают null, когда колонки в отчёте нет вовсе — тогда и сумма
+    // должна остаться null, а не притвориться нулевыми продажами.
+    const sumOrNull = field =>
+      group.some(line => line[field] !== null) ? sum(field) : null;
+
+    const start = sum("start");
+    const receipt = sum("receipt");
+    const expense = sum("expense");
+    const end = sum("end");
+    const available = start + receipt;
+    const turnover = available > 0 ? available / expense : 0;
+    const stockDays = turnover * options.periodDays;
+    const sellThrough = available > 0 ? expense / available : 0;
+
+    const first = group[0];
+
+    return {
+      sourceRow: first.sourceRow,
+      point: unique(group.map(line => line.point || "")).join(", "),
+      sku: first.sku,
+      name: first.name,
+      category: first.category,
+      start,
+      receipt,
+      available,
+      expense,
+      retailSales: sumOrNull("retailSales"),
+      buyerSales: sumOrNull("buyerSales"),
+      end,
+      turnover: Number(turnover.toFixed(3)),
+      stockDays: Number(stockDays.toFixed(1)),
+      sellThrough: Number(sellThrough.toFixed(3)),
+      recommendedOrder: computeRecommendedOrder(
+        { expense, available, end, retailSales: null, buyerSales: null, turnover, stockDays, sellThrough },
+        options
+      )
+    };
+  });
 }
 
 /**
@@ -774,7 +831,7 @@ function readReport(filePath, options) {
     }
   }
 
-  const combined = combineSheetLines(lines);
+  const combined = combineSheetLines(lines, options);
 
   combined.sort((first, second) => {
     // Заказ, суженный до категорий, закупщик читает категориями: сначала все
