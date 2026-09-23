@@ -11,6 +11,8 @@ import {
 import { editImage, formatImageResult } from "./tools/drawImage.js";
 import { splitMessage }
   from "./utils/splitMessage.js";
+import { getDocumentReply, getImageReply } from "./utils/replyFiles.js";
+import { sanitizeFileName } from "./utils/fileNames.js";
 import { logError, logInfo } from "./utils/logger.js";
 import { describeRunningCode } from "./version.js";
 
@@ -366,60 +368,6 @@ function normalizeTelegramText(text) {
 }
 
 /**
- * Картинку теперь рисует OpenRouter и отдаёт её как base64 — drawImage.js
- * decode-ит и сохраняет файл в exports/, а сюда прилетает готовый путь той
- * же сентинел-строкой, что Excel использует для документов ("Excel-файл:").
- * @param {string} answer
- * @returns {{filePath: string, caption: string}|null}
- */
-function getImageReply(answer) {
-  const match = answer.match(/^Картинка-файл:\n(.+)$/m);
-
-  if (!match) {
-    return null;
-  }
-
-  const filePath = path.resolve(String(match[1]).trim());
-
-  if (!fs.existsSync(filePath)) {
-    return null;
-  }
-
-  return {
-    filePath,
-    caption: answer
-      .replace(/^Картинка-файл:\n.+$/m, "Картинка готова.")
-      .slice(0, 1000)
-  };
-}
-
-/**
- * @param {string} answer
- * @returns {{filePath: string, fileName: string, caption: string}|null}
- */
-function getDocumentReply(answer) {
-  const match = answer.match(/^Excel-файл:\s*(.+\.xlsx)\s*$/m);
-
-  if (!match) {
-    return null;
-  }
-
-  const filePath = path.resolve(String(match[1]).trim());
-
-  if (!fs.existsSync(filePath)) {
-    return null;
-  }
-
-  return {
-    filePath,
-    fileName: path.basename(filePath),
-    caption: answer
-      .replace(/^Excel-файл:\s*.+\.xlsx\s*$/m, "Excel-файл прикреплён.")
-      .slice(0, 1000)
-  };
-}
-
-/**
  * @param {string|undefined} fileName
  * @returns {boolean}
  */
@@ -429,22 +377,7 @@ function isSpreadsheetDocument(fileName) {
   );
 }
 
-/**
- * Приводит имя файла к безопасному виду. Кроме символов, запрещённых в путях
- * (`<>:"/\|?*`), убираем `,` и `;` — дальше по коду extractSpreadsheetPaths
- * трактует их как разделители списка файлов, и запятая в имени превращается
- * в ложный путь вида «_хвост_после_запятой.xlsx».
- * @param {string} value
- * @returns {string}
- */
-export function sanitizeFileName(value) {
-  return String(value || "table.xlsx")
-    .replace(/[<>:"/\\|?*,;]/g, "_")
-    .split("")
-    .filter(char => char.charCodeAt(0) >= 32)
-    .join("")
-    .slice(0, 120);
-}
+export { sanitizeFileName };
 
 /**
  * Обрыв связи, который лечится повтором, а не разбором причины.

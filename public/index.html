@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI Agent Artik</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div class="app">
+  <header class="topbar">
+    <div class="topbar-title">
+      <span class="topbar-emoji">🤖</span>
+      <div>
+        <h1>AI Agent Artik</h1>
+        <p id="agentModeLabel">Режим: обычный</p>
+      </div>
+    </div>
+    <div class="agent-switch" role="group" aria-label="Режим агента">
+      <button type="button" class="mode-btn active" data-mode="default">Обычный</button>
+      <button type="button" class="mode-btn" data-mode="coder">Программист</button>
+      <button type="button" class="mode-btn" data-mode="architect">Архитектор</button>
+    </div>
+  </header>
+
+  <main id="chatLog" class="chat-log" aria-live="polite">
+    <div class="bubble bot">
+      <div class="bubble-text">Привет! Я твой персональный AI-агент. Спроси что-нибудь, пришли Excel-файл или нажми одну из кнопок ниже. 👇</div>
+    </div>
+  </main>
+
+  <div id="quickActions" class="quick-actions" aria-label="Быстрые действия"></div>
+
+  <form id="composer" class="composer">
+    <input type="file" id="fileInput" accept=".xlsx,.xls,.csv" hidden>
+    <button type="button" id="attachButton" class="icon-btn" title="Прикрепить Excel/CSV" aria-label="Прикрепить файл">📎</button>
+    <textarea id="messageInput" placeholder="Напиши сообщение..." rows="1" autofocus></textarea>
+    <button type="submit" id="sendButton" class="send-btn" aria-label="Отправить">Отправить</button>
+  </form>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>
