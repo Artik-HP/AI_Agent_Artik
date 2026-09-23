@@ -26,5 +26,15 @@ export default defineConfig([
     languageOptions: {
       sourceType: "commonjs"
     }
+  },
+  {
+    files: ["public/**/*.js"],
+    languageOptions: {
+      ecmaVersion: "latest",
+      sourceType: "script",
+      globals: {
+        ...globals.browser
+      }
+    }
   }
 ]);

@@ -1,5 +1,3 @@
-import http from "node:http";
-
 import "dotenv/config";
 
 import { createInterface } from "node:readline";
@@ -7,7 +5,9 @@ import { stdin as input, stdout as output } from "node:process";
 
 import Agent from "./src/agent.js";
 import { startTelegramBot } from "./src/telegram.js";
+import { createWebApp } from "./src/web.js";
 import {
+  closeDatabase,
   initDatabase
 } from "./src/database.js";
 import { installCrashHandlers, logError, logInfo } from "./src/utils/logger.js";
@@ -59,7 +59,7 @@ async function main() {
   try {
     await runCli();
   } finally {
-   // await closeDatabase();
+    await closeDatabase();
   }
 }
 
@@ -127,16 +127,30 @@ main().catch(error => {
   process.exitCode = 1;
 });
 
-const HTTP_PORT = Number.parseInt(process.env.PORT ?? "10000", 10);
+/**
+ * PORT иногда приходит не голым числом (например "0.0.0.0:10000" из
+ * скопированной docker-строки) — Number.parseInt на таком молча даёт 0,
+ * а порт 0 для Node значит "выбери случайный свободный порт". Достаём
+ * число даже из хвоста строки, чтобы не слушать порт непредсказуемо.
+ * @param {string|undefined} value
+ * @returns {number}
+ */
+function resolveHttpPort(value) {
+  const match = String(value ?? "").match(/(\d+)\s*$/);
+  const port = match ? Number.parseInt(match[1], 10) : NaN;
 
-const server = http.createServer((req, res) => {
-  res.writeHead(200, {
-    "Content-Type": "text/plain; charset=utf-8",
-  });
+  return Number.isInteger(port) && port > 0 ? port : 10000;
+}
 
-  res.end("AI Agent Artik Bot is alive 🚀");
-});
+const HTTP_PORT = resolveHttpPort(process.env.PORT);
 
-server.listen(HTTP_PORT, "0.0.0.0", () => {
-  console.log(`🌐 Render HTTP server running on port ${HTTP_PORT}`);
+// Тот же порт, что Render проверяет health-check'ом, теперь отдаёт и
+// веб-интерфейс: заглушку на "жив ли процесс" заменил настоящий продукт.
+const webApp = createWebApp();
+
+const webServer = webApp.listen(HTTP_PORT, "0.0.0.0", () => {
+  const address = webServer.address();
+  const boundPort = typeof address === "object" && address ? address.port : HTTP_PORT;
+
+  logInfo(`🌐 Веб-интерфейс и health-check на порту ${boundPort}`);
 });
