@@ -1,5 +1,7 @@
 import { Pool } from "pg";
 
+import { logError, logInfo } from "./utils/logger.js";
+
 /** @type {Pool | null} */
 let db = null;
 /** @type {Promise<boolean> | null} */
@@ -177,7 +179,7 @@ export async function dbQuery(sql, params = []) {
  */
 export async function initDatabase() {
     if (!isDatabaseConfigured()) {
-        console.log("⚠ DATABASE_URL не указан. Используется memory.json");
+        logInfo("⚠ DATABASE_URL не указан. Используется memory.json");
         return false;
     }
 
@@ -191,7 +193,7 @@ export async function initDatabase() {
 
             await pool.query("SELECT NOW();");
 
-            console.log("✅ PostgreSQL подключён.");
+            logInfo("✅ PostgreSQL подключён.");
 
             await pool.query(`
                 CREATE TABLE IF NOT EXISTS messages (
@@ -229,6 +231,24 @@ export async function initDatabase() {
             `);
 
             await pool.query(`
+                CREATE TABLE IF NOT EXISTS projects (
+                id SERIAL PRIMARY KEY,
+                chat_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                stack TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'новый',
+                tasks JSONB NOT NULL DEFAULT '[]',
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                updated_at TIMESTAMPTZ DEFAULT NOW()
+            );
+            `);
+
+            await pool.query(`
+                CREATE INDEX IF NOT EXISTS projects_chat_idx
+                ON projects (chat_id, name);
+            `);
+
+            await pool.query(`
                 DO $$
                 BEGIN
                     IF to_regclass('public.memory') IS NOT NULL THEN
@@ -248,14 +268,13 @@ export async function initDatabase() {
                 END $$;
             `);
 
-            console.log("✅ Таблицы готовы.");
+            logInfo("✅ Таблицы готовы.");
 
             return true;
         } catch (err) {
             initPromise = null;
 
-            console.error("❌ Ошибка PostgreSQL");
-            console.error(err);
+            logError("❌ Ошибка PostgreSQL", err);
 
             throw err;
         }
@@ -272,7 +291,7 @@ export async function closeDatabase() {
     await db.end();
     db = null;
     initPromise = null;
-    console.log("🔌 PostgreSQL отключён.");
+    logInfo("🔌 PostgreSQL отключён.");
 }
 
 /**

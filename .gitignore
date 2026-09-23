@@ -25,6 +25,7 @@ dist/
 build/
 
 memory.json
+projects.json
 # бэкапы пула файлов (Excel пользователя, не код)
 backup/
 

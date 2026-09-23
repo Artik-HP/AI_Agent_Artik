@@ -5,8 +5,9 @@ import test from "node:test";
 
 import ExcelJS from "exceljs";
 
-import Agent, { shouldUseExcelTool } from "../src/agent.js";
+import Agent, { shouldUseExcelTool, shouldUseProjectManager } from "../src/agent.js";
 import * as memory from "../src/memory.js";
+import * as projects from "../src/projects.js";
 import {
   CRITERIA_PRESETS,
   EXCEL_ACTIONS,
@@ -263,11 +264,16 @@ test("agent prepares supplier purchase order from Excel files", async () => {
   const tempDir = path.join(process.cwd(), "test", ".tmp-excel");
   const stockFile = path.join(tempDir, "ostatki.xlsx");
   const priceFile = path.join(tempDir, "price.xlsx");
+  // Свой chatId — иначе new Agent() садится в "default" и подбирает
+  // реальные файлы из production-памяти (DATABASE_URL смотрит на боевую
+  // базу), а не только явно переданные остатки/прайс.
+  const chatId = "test-purchase-order-explicit-files";
 
   fs.rmSync(tempDir, {
     recursive: true,
     force: true
   });
+  await memory.clear(chatId);
 
   await writeTestWorkbook(stockFile, "Остатки", [
     {
@@ -301,7 +307,7 @@ test("agent prepares supplier purchase order from Excel files", async () => {
     }
   ]);
 
-  const agent = new Agent();
+  const agent = new Agent(chatId);
   const answer = await agent.process(
     `/excel заказ остатки=${stockFile} прайс=${priceFile}`
   );
@@ -327,6 +333,7 @@ test("agent prepares supplier purchase order from Excel files", async () => {
     recursive: true,
     force: true
   });
+  await memory.clear(chatId);
 });
 
 test("agent prepares purchase order from remembered Telegram path with spaces", async () => {
@@ -588,6 +595,127 @@ test("asking for condoms and lubricants narrows the same order", async () => {
 
   fs.rmSync(fileMatch[1], { force: true });
   fs.rmSync(tempDir, { recursive: true, force: true });
+});
+
+test("combineSheetLines merges the same SKU across points into one order line", async () => {
+  const tempDir = path.join(process.cwd(), "test", ".tmp-combine-points");
+  const reportFile = path.join(tempDir, "vsi-magazini.xlsx");
+  const header = ["Місце зберігання", "", "Начало", "Приход", "Расход",
+    "Отчет о розничных продажах", "Продажа покупателю", "Конец"];
+  const units = ["Номенклатура.Артикул", "Номенклатура.Найменування"];
+
+  fs.rmSync(tempDir, { recursive: true, force: true });
+  fs.mkdirSync(tempDir, { recursive: true });
+
+  const workbook = new ExcelJS.Workbook();
+
+  // Один и тот же SX-100 продаётся на двух точках одной книги — реальный
+  // случай выгрузки «Всі магазини», из-за которого combineSheetLines и завели.
+  const sheetT1 = workbook.addWorksheet("Т1");
+
+  sheetT1.addRows([
+    header,
+    units,
+    ["Т1", "", 10, 0, 8, 8, 0, 2],
+    ["SX-100", "Лубрикант Swiss Navy NAKED 59 мл", 10, 0, 8, 8, 0, 2]
+  ]);
+
+  const sheetT2 = workbook.addWorksheet("Т2");
+
+  sheetT2.addRows([
+    header,
+    units,
+    ["Т2", "", 5, 0, 4, 4, 0, 1],
+    ["SX-100", "Лубрикант Swiss Navy NAKED 59 мл", 5, 0, 4, 4, 0, 1]
+  ]);
+
+  await workbook.xlsx.writeFile(reportFile);
+
+  const agent = new Agent();
+  const answer = await agent.process(`/excel замовлення ${reportFile}`);
+  const fileMatch = answer.match(/^Excel-файл:\s*(.+\.xlsx)\s*$/m);
+
+  // Раздельно: Т1 ceil(8*2-2)=14, Т2 ceil(4*2-1)=7 — итого 2 строки, 21 ед.
+  // Объединено: available=15, expense=12, end=3 -> ceil(12*2-3)=21, но уже
+  // ОДНОЙ строкой — это и отличает объединение от простого сложения текста.
+  assert.match(answer, /Лист «Замовлення» \(весь товар\): 1 позиций, 21 ед\. к заказу/);
+  assert.ok(fileMatch);
+  assert.ok(fs.existsSync(fileMatch[1]));
+
+  const resultWorkbook = await new ExcelJS.Workbook().xlsx.readFile(fileMatch[1]);
+  const worksheet = resultWorkbook.getWorksheet("Замовлення");
+
+  assert.equal(worksheet.getCell("A2").value, "SX-100");
+  assert.equal(worksheet.rowCount, 2);
+
+  fs.rmSync(fileMatch[1], { force: true });
+  fs.rmSync(tempDir, { recursive: true, force: true });
+});
+
+test("project manager tracks name, stack, status and tasks through a chat", async () => {
+  const chatId = "test-project-manager";
+
+  await projects.clearProjects(chatId);
+
+  const agent = new Agent(chatId);
+
+  assert.match(
+    await agent.process("создай проект Telegram Shop Bot"),
+    /Проект «Telegram Shop Bot» создан\. Статус: новый\./
+  );
+  // Повторное создание не должно стирать уже собранные данные.
+  assert.match(
+    await agent.process("создай проект Telegram Shop Bot"),
+    /уже есть/
+  );
+  assert.match(
+    await agent.process("проект Telegram Shop Bot стек: Node.js, Telegraf"),
+    /Стек проекта «Telegram Shop Bot» обновлён: Node\.js, Telegraf/
+  );
+  assert.match(
+    await agent.process("проект Telegram Shop Bot статус: в разработке"),
+    /Статус проекта «Telegram Shop Bot»: в разработке/
+  );
+  assert.match(
+    await agent.process("проект Telegram Shop Bot задача: настроить оплату"),
+    /Задача добавлена/
+  );
+  assert.match(
+    await agent.process("проект Telegram Shop Bot задача: подключить БД"),
+    /Задача добавлена/
+  );
+  assert.match(
+    await agent.process("проект Telegram Shop Bot готово: подключить БД"),
+    /Задача выполнена в «Telegram Shop Bot»: подключить БД/
+  );
+
+  const card = await agent.process("проект Telegram Shop Bot");
+
+  assert.match(card, /Статус: в разработке/);
+  assert.match(card, /Стек: Node\.js, Telegraf/);
+  assert.match(card, /◻️ настроить оплату/);
+  assert.match(card, /✅ подключить БД/);
+
+  assert.match(
+    await agent.process("/projects"),
+    /Telegram Shop Bot — в разработке \(1\/2 задач\)/
+  );
+
+  // Случайное упоминание слова «проект» посреди фразы не должно перехватывать
+  // сообщение — только команды, начинающиеся с «проект»/«создай проект» и т.п.
+  assert.equal(shouldUseProjectManager("расскажи про мой проект по работе"), false);
+  assert.equal(shouldUseProjectManager("calc 2+2"), false);
+
+  assert.match(
+    await agent.process("удали проект Telegram Shop Bot"),
+    /Проект «Telegram Shop Bot» удалён\./
+  );
+  assert.match(
+    await agent.process("/projects"),
+    /Пока нет ни одного проекта/
+  );
+
+  await projects.clearProjects(chatId);
 });
 
 test("рабочие листы книги не становятся торговыми точками", async () => {
