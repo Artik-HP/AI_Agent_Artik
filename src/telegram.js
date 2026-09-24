@@ -12,6 +12,7 @@ import { editImage, formatImageResult } from "./tools/drawImage.js";
 import { splitMessage }
   from "./utils/splitMessage.js";
 import { getDocumentReply, getImageReply } from "./utils/replyFiles.js";
+import { dataPath, dataRoot } from "./utils/dataDir.js";
 import { sanitizeFileName } from "./utils/fileNames.js";
 import { logError, logInfo } from "./utils/logger.js";
 import { describeRunningCode } from "./version.js";
@@ -661,8 +662,7 @@ async function handleDocumentMessage(ctx) {
 
   try {
     const fileBuffer = await downloadTelegramFile(document.file_id, ctx);
-    const uploadDir = path.resolve(
-      process.cwd(),
+    const uploadDir = dataPath(
       "data",
       "telegram",
       String(chatId || "default")
@@ -675,8 +675,11 @@ async function handleDocumentMessage(ctx) {
     });
     fs.writeFileSync(filePath, new Uint8Array(fileBuffer));
 
+    // Тот же корень, что reader.js использует для resolveProjectPath —
+    // иначе относительный путь, который агент запомнит и покажет здесь,
+    // не совпадёт с тем, что Excel-модуль потом ищет при DATA_DIR != cwd.
     const projectPath = path
-      .relative(process.cwd(), filePath)
+      .relative(dataRoot(), filePath)
       .split(path.sep)
       .join("/");
 

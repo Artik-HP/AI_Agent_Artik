@@ -1,10 +1,15 @@
 import fs from "node:fs";
 import path from "node:path";
 
+import { dataPath } from "./dataDir.js";
+
 /**
  * Файловый лог. Бот живёт в терминале, а терминал закрывают — вместе со всей
  * историей падения. После «перестал отвечать» смотреть было решительно некуда,
- * поэтому всё важное дублируем в `logs/bot.log`.
+ * поэтому всё важное дублируем в `logs/bot.log`. На DATA_DIR по той же
+ * причине, что и остальные данные: на Render код (а с ним и process.cwd())
+ * пересоздаётся при каждом деплое, а история падения перед деплоем — как раз
+ * то, что здесь нужно посмотреть.
  */
 
 const LOG_DIR = "logs";
@@ -17,7 +22,7 @@ const MAX_SIZE_BYTES = 5 * 1024 * 1024;
  * @returns {string}
  */
 function logPath() {
-  return path.resolve(process.cwd(), LOG_DIR, LOG_FILE);
+  return dataPath(LOG_DIR, LOG_FILE);
 }
 
 /**

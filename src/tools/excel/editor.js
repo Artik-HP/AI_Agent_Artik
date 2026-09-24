@@ -12,6 +12,7 @@ import {
   resolveProjectPath
 } from "./reader.js";
 import { askModel } from "../../model.js";
+import { dataPath } from "../../utils/dataDir.js";
 
 const BACKUP_DIR = "backups";
 
@@ -117,14 +118,79 @@ function mapHeadersToColumns(worksheet) {
  * @param {string} filePath
  * @returns {string}
  */
+/**
+ * Очередь по пути файла: без нехеё два одновременных редактирования одной
+ * книги читали бы один и тот же снимок и при записи затирали правки друг
+ * друга (последняя запись побеждает). Только один процесс (см. deploy/ —
+ * PM2 fork-режим и systemd Type=simple), поэтому память процесса как
+ * состояние очереди безопасна, отдельная блокировка на диске не нужна.
+ * @type {Map<string, Promise<unknown>>}
+ */
+const fileLocks = new Map();
+
+/**
+ * @template T
+ * @param {string} filePath
+ * @param {() => Promise<T>} fn
+ * @returns {Promise<T>}
+ */
+export function withFileLock(filePath, fn) {
+  const previous = fileLocks.get(filePath) || Promise.resolve();
+  const queued = previous.then(fn, fn);
+
+  // Хвост очереди не должен запомнить отказ — иначе следующая операция с
+  // этим же файлом сразу же провалилась бы чужой ошибкой.
+  fileLocks.set(filePath, queued.catch(() => {}));
+
+  return queued;
+}
+
+/**
+ * Каждая правка добавляет файл в backups/, но ничего оттуда не убирает —
+ * на реальном обороте (много правок в день) каталог рос бы неограниченно.
+ * Чистим только по возрасту, не по числу файлов: так не потерять недавний
+ * бэкап только из-за всплеска правок за один день.
+ * @param {string} backupDir
+ * @returns {void}
+ */
+function pruneOldBackups(backupDir) {
+  const maxAgeDays = Number(process.env.BACKUP_RETENTION_DAYS) || 30;
+  const cutoff = Date.now() - maxAgeDays * 24 * 60 * 60 * 1000;
+
+  let entries;
+
+  try {
+    entries = fs.readdirSync(backupDir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith(".bak")) {
+      continue;
+    }
+
+    const entryPath = path.join(backupDir, entry.name);
+
+    try {
+      if (fs.statSync(entryPath).mtimeMs < cutoff) {
+        fs.rmSync(entryPath, { force: true });
+      }
+    } catch {
+      // Файл уже удалён параллельно или недоступен — не повод падать.
+    }
+  }
+}
+
 function backupFile(filePath) {
-  const backupDir = path.resolve(process.cwd(), BACKUP_DIR);
+  const backupDir = dataPath(BACKUP_DIR);
   fs.mkdirSync(backupDir, { recursive: true });
 
   const timestamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\..+$/, "");
   const backupPath = path.join(backupDir, `${path.basename(filePath)}.${timestamp}.bak`);
 
   fs.copyFileSync(filePath, backupPath);
+  pruneOldBackups(backupDir);
 
   return backupPath;
 }
@@ -196,55 +262,57 @@ export async function applyEditPlan(edits) {
       continue;
     }
 
-    const workbook = new ExcelJS.Workbook();
-    await workbook.xlsx.readFile(fullPath);
+    await withFileLock(fullPath, async () => {
+      const workbook = new ExcelJS.Workbook();
+      await workbook.xlsx.readFile(fullPath);
 
-    const backupPath = backupFile(fullPath);
-    let changed = false;
+      const backupPath = backupFile(fullPath);
+      let changed = false;
 
-    for (const edit of fileEdits) {
-      const worksheet = edit.sheet
-        ? workbook.getWorksheet(edit.sheet)
-        : workbook.worksheets[0];
+      for (const edit of fileEdits) {
+        const worksheet = edit.sheet
+          ? workbook.getWorksheet(edit.sheet)
+          : workbook.worksheets[0];
 
-      if (!worksheet) {
-        skipped.push({ edit, reason: `лист "${edit.sheet}" не найден` });
-        continue;
-      }
-
-      const headerMap = mapHeadersToColumns(worksheet);
-      const matchCol = headerMap.get(normalizeHeader(edit.matchColumn));
-      const setCol = headerMap.get(normalizeHeader(edit.setColumn));
-
-      if (!matchCol || !setCol) {
-        skipped.push({ edit, reason: "колонка не найдена в файле" });
-        continue;
-      }
-
-      let rowsChanged = 0;
-
-      worksheet.eachRow((row, rowNumber) => {
-        if (rowNumber === 1) return;
-
-        const cellValue = String(row.getCell(matchCol).value ?? "").trim();
-
-        if (cellValue === String(edit.matchValue).trim()) {
-          row.getCell(setCol).value = edit.setValue;
-          rowsChanged++;
-          changed = true;
+        if (!worksheet) {
+          skipped.push({ edit, reason: `лист "${edit.sheet}" не найден` });
+          continue;
         }
-      });
 
-      if (rowsChanged > 0) {
-        applied.push({ edit, rowsChanged, backupPath });
-      } else {
-        skipped.push({ edit, reason: "совпадений не найдено" });
+        const headerMap = mapHeadersToColumns(worksheet);
+        const matchCol = headerMap.get(normalizeHeader(edit.matchColumn));
+        const setCol = headerMap.get(normalizeHeader(edit.setColumn));
+
+        if (!matchCol || !setCol) {
+          skipped.push({ edit, reason: "колонка не найдена в файле" });
+          continue;
+        }
+
+        let rowsChanged = 0;
+
+        worksheet.eachRow((row, rowNumber) => {
+          if (rowNumber === 1) return;
+
+          const cellValue = String(row.getCell(matchCol).value ?? "").trim();
+
+          if (cellValue === String(edit.matchValue).trim()) {
+            row.getCell(setCol).value = edit.setValue;
+            rowsChanged++;
+            changed = true;
+          }
+        });
+
+        if (rowsChanged > 0) {
+          applied.push({ edit, rowsChanged, backupPath });
+        } else {
+          skipped.push({ edit, reason: "совпадений не найдено" });
+        }
       }
-    }
 
-    if (changed) {
-      await workbook.xlsx.writeFile(fullPath);
-    }
+      if (changed) {
+        await workbook.xlsx.writeFile(fullPath);
+      }
+    });
   }
 
   return { applied, skipped };

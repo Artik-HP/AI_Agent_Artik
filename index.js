@@ -10,6 +10,7 @@ import {
   closeDatabase,
   initDatabase
 } from "./src/database.js";
+import { assertDataDirWritable } from "./src/utils/dataDir.js";
 import { installCrashHandlers, logError, logInfo } from "./src/utils/logger.js";
 
 // Ставим до всего остального: падение на старте тоже должно оставить след.
@@ -45,6 +46,10 @@ function getErrorMessage(error) {
 }
 
 async function main() {
+  // Явно и громко на старте: DATA_DIR указан, но недоступен на запись —
+  // лучше не запуститься, чем молча терять загрузки/память/бэкапы позже.
+  assertDataDirWritable();
+
   await initDatabase();
 
   const isTelegramMode =
