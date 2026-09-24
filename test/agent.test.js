@@ -20,6 +20,7 @@ import {
   extractSpreadsheetPaths,
   loadWorkbooks
 } from "../src/tools/excel/reader.js";
+import { withFileLock } from "../src/tools/excel/editor.js";
 import { extractKeepPhrase } from "../src/tools/excel/filterByName.js";
 import {
   discoverChatFiles,
@@ -184,6 +185,106 @@ test("agent switches back to default mode", async () => {
     await agent.process("/agent default"),
     "Режим агента переключён: default"
   );
+});
+
+test("withFileLock serializes operations on the same key, parallel keys stay independent", async () => {
+  const order = [];
+  const key = "test-lock-key.xlsx";
+  const otherKey = "test-lock-key-2.xlsx";
+
+  const slow = tag => async () => {
+    order.push(`${tag}-start`);
+    await new Promise(resolve => setTimeout(resolve, 20));
+    order.push(`${tag}-end`);
+    return tag;
+  };
+
+  const [a, b, c] = await Promise.all([
+    withFileLock(key, slow("first")),
+    withFileLock(key, slow("second")),
+    withFileLock(otherKey, slow("other-key"))
+  ]);
+
+  assert.deepEqual([a, b, c], ["first", "second", "other-key"]);
+
+  // Одна и та же книга: second никогда не должен начаться раньше, чем
+  // завершится first — иначе они читали бы один и тот же снимок и одна из
+  // правок терялась бы при записи.
+  const firstEnd = order.indexOf("first-end");
+  const secondStart = order.indexOf("second-start");
+
+  assert.ok(
+    firstEnd < secondStart,
+    `second начался до завершения first: ${order.join(", ")}`
+  );
+
+  // Другой файл (другой ключ) не ждёт очередь первого — виден в порядке
+  // где-то в процессе, а не только после second-end.
+  assert.ok(order.includes("other-key-start"));
+});
+
+test("withFileLock does not jam the queue after a rejected operation", async () => {
+  const key = "test-lock-key-error.xlsx";
+
+  await assert.rejects(
+    withFileLock(key, async () => {
+      throw new Error("boom");
+    })
+  );
+
+  assert.equal(
+    await withFileLock(key, async () => "ok-after-error"),
+    "ok-after-error"
+  );
+});
+
+test("publicMode blocks file/codebase/excel/projects tools, private agent keeps them", async () => {
+  const publicAgent = new Agent("public-mode-test", { publicMode: true });
+  const privateAgent = new Agent("private-mode-test");
+  const denied = "Эта функция доступна только владельцу агента, не в публичном демо-чате.";
+
+  assert.equal(await publicAgent.process("прочитай файл package.json"), denied);
+  assert.equal(await publicAgent.process("структура проекта"), denied);
+  assert.equal(await publicAgent.process("/write test/.tmp-publicmode.txt | нет"), denied);
+  assert.equal(await publicAgent.process("/codebase"), denied);
+  assert.equal(await publicAgent.process("/projects"), denied);
+
+  // Приватный агент (Telegram/CLI) теми же командами не задет — поведение
+  // не изменилось у него ни на символ. /projects детерминирован (без LLM),
+  // в отличие от «структура проекта», которая всегда идёт через
+  // analyzeResults → askModel даже при разрешённом доступе — не показатель
+  // именно publicMode-гейта, поэтому не проверяем её здесь без API-ключа.
+  assert.notEqual(await privateAgent.process("/projects"), denied);
+});
+
+test("publicMode refuses to switch persona, private agent still can", async () => {
+  const publicAgent = new Agent("public-mode-agent-switch", { publicMode: true });
+  const privateAgent = new Agent("private-mode-agent-switch");
+
+  assert.equal(
+    await publicAgent.process("/agent default"),
+    "Смена роли недоступна в публичном демо-чате."
+  );
+  assert.equal(
+    await publicAgent.process("/agent publicWeb"),
+    "Смена роли недоступна в публичном демо-чате."
+  );
+  assert.equal(
+    await privateAgent.process("/agent coder"),
+    "Режим агента переключён: coder"
+  );
+});
+
+test("publicMode /tools lists only the allowed subset", async () => {
+  const publicAgent = new Agent("public-mode-tools-list", { publicMode: true });
+  const listing = await publicAgent.process("/tools");
+
+  assert.match(listing, /\/calc/);
+  assert.match(listing, /\/weather/);
+  assert.doesNotMatch(listing, /\/fileReader/);
+  assert.doesNotMatch(listing, /\/fileWriter/);
+  assert.doesNotMatch(listing, /\/codebase/);
+  assert.doesNotMatch(listing, /\/excel/);
 });
 
 async function writeTestWorkbook(filePath, sheetName, rows) {

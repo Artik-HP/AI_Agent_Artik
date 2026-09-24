@@ -111,7 +111,12 @@ projects: {
 },
 };
 
-export function listTools() {
+/**
+ * @param {ReadonlySet<string>} [allowedNames] если задано — показать только эти инструменты
+ * @returns {string}
+ */
+export function listTools(allowedNames) {
   return Object.entries(tools)
+    .filter(([name]) => !allowedNames || allowedNames.has(name))
     .map(([name, tool]) => `/${name} — ${tool.description}`)
     .join("\n")};

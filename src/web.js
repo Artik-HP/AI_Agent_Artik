@@ -5,19 +5,22 @@ import path from "node:path";
 import express from "express";
 
 import Agent from "./agent.js";
-import * as memory from "./memory.js";
 import { CRITERIA_PRESETS, EXCEL_ACTIONS } from "./telegram.js";
-import { sanitizeFileName } from "./utils/fileNames.js";
+import { dataPath } from "./utils/dataDir.js";
 import { logError } from "./utils/logger.js";
+import { checkPublicRateLimit } from "./utils/rateLimit.js";
 import { getDocumentReply, getImageReply } from "./utils/replyFiles.js";
+import { readTrustedSessionId, requireAgentKey } from "./utils/webAuth.js";
 
 const SESSION_COOKIE = "artik_sid";
 const SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 30;
-const MAX_UPLOAD_BYTES = 15 * 1024 * 1024;
-const EXPORTS_DIR = path.resolve(process.cwd(), "exports");
-const UPLOAD_ROOT = path.resolve(process.cwd(), "data", "web");
+// exports/ — пользовательские данные, живёт на DATA_DIR (по умолчанию
+// совпадает с process.cwd(), см. utils/dataDir.js). public/ — статика
+// сайта, часть кода, деплой пересоздаёт её каждый раз — остаётся на
+// process.cwd() намеренно, DATA_DIR её не трогает. Excel-загрузок здесь
+// больше нет (см. /api/upload ниже) — UPLOAD_ROOT/data/web/ не нужны.
+const EXPORTS_DIR = dataPath("exports");
 const PUBLIC_DIR = path.resolve(process.cwd(), "public");
-const SPREADSHEET_EXTENSIONS = new Set([".csv", ".xls", ".xlsx"]);
 
 /**
  * Одна сессия браузера — один Agent, как в Telegram один чат — один Agent.
@@ -35,12 +38,18 @@ function toChatId(sessionId) {
 }
 
 /**
+ * Веб-поверхность теперь всегда публичный демо-режим (ограниченные
+ * инструменты, отдельная персона — см. options.publicMode в agent.js). Полный
+ * доступ владельца остаётся на Telegram и CLI, как и было основным способом
+ * работы с ботом; веб-чат в одиночку никогда не проходил аутентификацию (см.
+ * requireAgentKey ниже), так что различать «владелец в браузере» и
+ * «анонимный посетитель» здесь нет смысла — оба видны серверу одинаково.
  * @param {string} sessionId
  * @returns {Agent}
  */
 function getSessionAgent(sessionId) {
   if (!sessions.has(sessionId)) {
-    sessions.set(sessionId, new Agent(toChatId(sessionId)));
+    sessions.set(sessionId, new Agent(toChatId(sessionId), { publicMode: true }));
   }
 
   return /** @type {Agent} */ (sessions.get(sessionId));
@@ -58,13 +67,22 @@ function readSessionCookie(req) {
 }
 
 /**
- * Достаёт id сессии из cookie или заводит новую — так же, как Telegram
- * получает chatId из апдейта: один раз на первое сообщение.
+ * Достаёт id сессии из доверенного заголовка (портфолио-прокси сам ведёт
+ * сессию и прокидывает её id явно — cookie браузера до сервера агента в
+ * server-to-server fetch всё равно не доходит), иначе из cookie, иначе
+ * заводит новую — так же, как Telegram получает chatId из апдейта: один раз
+ * на первое сообщение.
  * @param {import("express").Request} req
  * @param {import("express").Response} res
  * @returns {string}
  */
 function ensureSession(req, res) {
+  const trusted = readTrustedSessionId(req);
+
+  if (trusted) {
+    return trusted;
+  }
+
   const existing = readSessionCookie(req);
 
   if (existing) {
@@ -132,7 +150,7 @@ export function createWebApp() {
     res.type("text/plain").send("AI Agent Artik Bot is alive 🚀");
   });
 
-  app.get("/api/quick-actions", (req, res) => {
+  app.get("/api/quick-actions", requireAgentKey, (req, res) => {
     res.json({
       actions: EXCEL_ACTIONS.map(action => ({
         id: action.id,
@@ -145,12 +163,23 @@ export function createWebApp() {
     });
   });
 
-  app.post("/api/chat", async (req, res) => {
+  app.post("/api/chat", requireAgentKey, async (req, res) => {
     const sessionId = ensureSession(req, res);
     const message = String(req.body?.message || "").trim();
 
     if (!message) {
       res.status(400).json({ error: "Пустое сообщение." });
+      return;
+    }
+
+    const rateLimit = checkPublicRateLimit(req);
+
+    if (!rateLimit.allowed) {
+      res.status(429).json({
+        error: rateLimit.reason === "daily"
+          ? "Демо-чат сегодня уже исчерпал общий лимит сообщений. Загляни завтра."
+          : "Слишком много сообщений подряд. Попробуй через час."
+      });
       return;
     }
 
@@ -167,65 +196,19 @@ export function createWebApp() {
     }
   });
 
-  app.post("/api/upload", async (req, res) => {
-    const sessionId = ensureSession(req, res);
-    const body = req.body || {};
-    const originalName = String(body.filename || "");
-    const contentBase64 = String(body.contentBase64 || "");
-
-    if (!SPREADSHEET_EXTENSIONS.has(path.extname(originalName).toLowerCase())) {
-      res.status(400).json({
-        error: "Принимаю только Excel/CSV: .xlsx, .xls или .csv."
-      });
-      return;
-    }
-
-    let buffer;
-
-    try {
-      buffer = Buffer.from(contentBase64, "base64");
-    } catch {
-      res.status(400).json({ error: "Не смог прочитать файл." });
-      return;
-    }
-
-    if (buffer.length === 0 || buffer.length > MAX_UPLOAD_BYTES) {
-      res.status(413).json({ error: "Файл пустой или больше 15 МБ." });
-      return;
-    }
-
-    try {
-      const uploadDir = path.join(UPLOAD_ROOT, sessionId);
-
-      fs.mkdirSync(uploadDir, { recursive: true });
-
-      const fileName = `${Date.now()}-${sanitizeFileName(originalName)}`;
-      const filePath = path.join(uploadDir, fileName);
-
-      fs.writeFileSync(filePath, buffer);
-
-      const projectPath = path
-        .relative(process.cwd(), filePath)
-        .split(path.sep)
-        .join("/");
-
-      await memory.save(
-        `Excel файл загружен: ${projectPath}`,
-        toChatId(sessionId)
-      );
-
-      res.json({
-        message: `Файл получен: ${projectPath}. Выбери действие ниже или напиши, что сделать.`
-      });
-    } catch (error) {
-      logError("Ошибка веб-загрузки файла:", error);
-      res.status(500).json({ error: "Не удалось сохранить файл." });
-    }
+  // Публичный веб-виджет не даёт доступ к excel-инструменту (см. publicMode
+  // в agent.js) — принимать файлы, которые агент всё равно не сможет
+  // обработать, было бы лишней поверхностью для атак без пользы. Загрузка
+  // Excel/CSV остаётся в Telegram — там она полноценно работает.
+  app.post("/api/upload", requireAgentKey, (req, res) => {
+    res.status(403).json({
+      error: "Загрузка файлов недоступна в публичном демо-чате. Это доступно владельцу в Telegram."
+    });
   });
 
   // Отдаём только то, что бот сам сформировал в exports/ — ни листинга,
   // ни вложенных путей: имя файла проверяем от выхода за пределы каталога.
-  app.get("/files/:filename", (req, res) => {
+  app.get("/files/:filename", requireAgentKey, (req, res) => {
     const fileName = req.params.filename;
 
     if (!fileName || /[\\/]/.test(fileName) || fileName.includes("..")) {

@@ -5,6 +5,7 @@ import path from "node:path";
 import defaultAgent from "./agents/default.js";
 import coder from "./agents/coder.js";
 import architect from "./agents/architect.js";
+import publicWeb from "./agents/publicWeb.js";
 import { getNews } from "./tools/news.js";
 import { getWeather } from "./tools/weather.js";
 import { searchYouTube } from "./tools/youtube.js";
@@ -428,8 +429,35 @@ function extractEditImagePrompt(text, lower) {
 const AGENTS = /** @type {AgentRoles} */ ({
   default: defaultAgent.systemPrompt,
   coder: coder.systemPrompt,
-  architect: architect.systemPrompt
+  architect: architect.systemPrompt,
+  publicWeb: publicWeb.systemPrompt
 });
+
+/**
+ * Единая точка входа для публичного веб-виджета (портфолио) — и набор
+ * разрешённых инструментов, и персона, и запрет смены роли живут здесь
+ * рядом, одним местом для аудита, а не разбросаны по web.js и agent.js.
+ * Namespace-инструменты (excel/projects) сюда намеренно НЕ входят: это
+ * реальные бизнес-данные владельца, случайным посетителям сайта они не
+ * нужны и не предназначены. fileReader/fileWriter/projectTree/codebase —
+ * тоже вне списка: они читают/пишут сам код и структуру проекта.
+ * @type {ReadonlySet<string>}
+ */
+const PUBLIC_MODE_ALLOWED_TOOLS = new Set([
+  "time",
+  "calc",
+  "weather",
+  "uuid",
+  "random",
+  "base64",
+  "search",
+  "youtube",
+  "draw"
+]);
+
+/** Сообщение для инструмента, запрещённого в публичном режиме. */
+const PUBLIC_MODE_TOOL_DENIED =
+  "Эта функция доступна только владельцу агента, не в публичном демо-чате.";
 
 /**
  * Список команд одним плоским блоком читался тяжело — 34 строки подряд без
@@ -528,14 +556,29 @@ class Agent {
    * @type {Message[]}
    */
   conversationHistory;
-constructor(chatId = "default") {
+constructor(chatId = "default", options = {}) {
   this.chatId = String(chatId);
   this.conversationHistory = [];
-  this.currentAgent = "default";
+  // Публичный веб-виджет (портфолио) — options.publicMode из web.js.
+  // Telegram и CLI этот параметр не передают вообще, их поведение не
+  // меняется ни на символ.
+  this.publicMode = Boolean(options.publicMode);
+  this.currentAgent = this.publicMode ? "publicWeb" : "default";
   // currentAgent — текущий режим агента
   /** Путь к последней картинке этого чата — цель для «измени картинку». */
   this.lastImagePath = null;
-}  /**
+}
+
+/**
+ * Разрешён ли инструмент в текущем режиме. В публичном режиме — только
+ * PUBLIC_MODE_ALLOWED_TOOLS; вне его — всё разрешено, как и раньше.
+ * @param {string} toolName
+ * @returns {boolean}
+ */
+isToolAllowed(toolName) {
+  return !this.publicMode || PUBLIC_MODE_ALLOWED_TOOLS.has(toolName);
+}
+  /**
    * @returns {string}
    */
   showContext() {
@@ -598,7 +641,9 @@ async searchWeb(query) {
     }
 
     if (lower === "/tools") {
-  return listTools();
+  return this.publicMode
+    ? listTools(PUBLIC_MODE_ALLOWED_TOOLS)
+    : listTools();
     }
 
     if (lower === "/model") {
@@ -767,6 +812,10 @@ if (editImagePrompt !== null) {
   return await this.editLastImage(editImagePrompt);
 }
 
+if (shouldAnalyzeCodebase(lower) && !this.isToolAllowed("codebase")) {
+  return PUBLIC_MODE_TOOL_DENIED;
+}
+
 if (shouldAnalyzeCodebase(lower)) {
   const tool = tools.codebase;
 
@@ -784,6 +833,10 @@ if (shouldAnalyzeCodebase(lower)) {
 }
 
 if (shouldUseExcelTool(lower)) {
+  if (!this.isToolAllowed("excel")) {
+    return PUBLIC_MODE_TOOL_DENIED;
+  }
+
   const memories = await memory.getAll(this.chatId);
 
   return String(await tools.excel.run({
@@ -794,6 +847,10 @@ if (shouldUseExcelTool(lower)) {
 }
 
 if (shouldUseProjectManager(lower)) {
+  if (!this.isToolAllowed("projects")) {
+    return PUBLIC_MODE_TOOL_DENIED;
+  }
+
   return String(await tools.projects.run({
     query: text,
     chatId: this.chatId
@@ -801,9 +858,13 @@ if (shouldUseProjectManager(lower)) {
 }
 
 if (lower.startsWith("/agent ")) {
+  if (this.publicMode) {
+    return "Смена роли недоступна в публичном демо-чате.";
+  }
+
   const mode = text.replace("/agent", "").trim().toLowerCase();
 
-  if (!AGENTS[mode]) {
+  if (!AGENTS[mode] || mode === "publicWeb") {
     return [
       "Такого агента нет.",
       "Доступные режимы:",
@@ -873,6 +934,10 @@ if (
     lower.includes("страниц")
   )
 ) {
+  if (!this.isToolAllowed("webReader")) {
+    return PUBLIC_MODE_TOOL_DENIED;
+  }
+
   const url = urlMatch[0];
 
   const tool = tools.webReader;
@@ -894,6 +959,10 @@ if (
   lower.startsWith("открой файл ") ||
   lower.startsWith("покажи файл ")
 ) {
+  if (!this.isToolAllowed("fileReader")) {
+    return PUBLIC_MODE_TOOL_DENIED;
+  }
+
   const filePath = text
     .replace(/^прочитай файл\s+/i, "")
     .replace(/^открой файл\s+/i, "")
@@ -915,6 +984,10 @@ if (
   lower.includes("дерево проекта") ||
   lower.includes("project tree")
 ) {
+  if (!this.isToolAllowed("projectTree")) {
+    return PUBLIC_MODE_TOOL_DENIED;
+  }
+
   const toolResult = await tools.projectTree.run(".");
 
   return await analyzeResults(
@@ -925,6 +998,10 @@ if (
 }
 
 if (lower.startsWith("/write ")) {
+  if (!this.isToolAllowed("fileWriter")) {
+    return PUBLIC_MODE_TOOL_DENIED;
+  }
+
   const payload = text.slice(7).trim();
 
   const [filePath, ...contentParts] = payload.split("|");
@@ -953,6 +1030,10 @@ const route = await chooseTool(text);
     }
 
     if (route && route.tool && route.tool !== "none") {
+      if (!this.isToolAllowed(route.tool)) {
+        return PUBLIC_MODE_TOOL_DENIED;
+      }
+
       const tool = tools[route.tool];
 
       if (!tool) {
@@ -1059,7 +1140,7 @@ let selectedModel =
   MODELS[this.currentAgent] ||
   MODELS.default;
 
-    if (lower.startsWith("/coder")) {
+    if (lower.startsWith("/coder") && !this.publicMode) {
       agentRole = AGENTS.coder;
       cleanText = text.replace("/coder", "").trim();
       selectedModel =
@@ -1076,7 +1157,7 @@ console.log(
   AGENTS[this.currentAgent]
     ?.slice(0, 200)
 );
-    if (lower.startsWith("/architect")) {
+    if (lower.startsWith("/architect") && !this.publicMode) {
       agentRole = AGENTS.architect;
       cleanText = text.replace("/architect", "").trim();
       selectedModel =
