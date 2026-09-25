@@ -46,10 +46,6 @@ function getErrorMessage(error) {
 }
 
 async function main() {
-  // Явно и громко на старте: DATA_DIR указан, но недоступен на запись —
-  // лучше не запуститься, чем молча терять загрузки/память/бэкапы позже.
-  assertDataDirWritable();
-
   await initDatabase();
 
   const isTelegramMode =
@@ -126,6 +122,17 @@ async function runCli() {
  * @param {unknown} error
  * @returns {string}
  */
+
+// Синхронно и до HTTP-листенера ниже: async main().catch() только
+// выставляет process.exitCode, а модуль продолжает выполняться дальше —
+// webApp.listen() поднялся бы всё равно, и /health отвечал бы "жив" при
+// нерабочем DATA_DIR. Явный process.exit(1) не оставляет такого зомби.
+try {
+  assertDataDirWritable();
+} catch (error) {
+  logError("DATA_DIR недоступен для записи, выходим:", error);
+  process.exit(1);
+}
 
 main().catch(error => {
   logError("Ошибка запуска:", error);

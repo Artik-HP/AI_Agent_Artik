@@ -140,7 +140,20 @@ export function withFileLock(filePath, fn) {
 
   // Хвост очереди не должен запомнить отказ — иначе следующая операция с
   // этим же файлом сразу же провалилась бы чужой ошибкой.
-  fileLocks.set(filePath, queued.catch(() => {}));
+  const tail = queued.catch(() => {});
+
+  fileLocks.set(filePath, tail);
+
+  // Убираем запись после завершения — иначе Map растёт без ограничения на
+  // долгоживущем процессе (у загруженных книг обычно уникальные пути с
+  // таймштампом, так что записи не переиспользуются). Удаляем, только если
+  // с тех пор не встала новая операция в очередь на этот же путь — иначе
+  // сотрём чужой, ещё актуальный хвост.
+  tail.finally(() => {
+    if (fileLocks.get(filePath) === tail) {
+      fileLocks.delete(filePath);
+    }
+  });
 
   return queued;
 }
@@ -154,7 +167,14 @@ export function withFileLock(filePath, fn) {
  * @returns {void}
  */
 function pruneOldBackups(backupDir) {
-  const maxAgeDays = Number(process.env.BACKUP_RETENTION_DAYS) || 30;
+  // Number(...) || 30 пропустил бы отрицательное значение (оно truthy) —
+  // тогда cutoff уехал бы в будущее и первая же чистка стёрла бы вообще
+  // все бэкапы, включая только что созданный. Та же проверка, что уже
+  // используется для лимитов запросов в utils/rateLimit.js.
+  const rawMaxAgeDays = Number(process.env.BACKUP_RETENTION_DAYS);
+  const maxAgeDays = Number.isFinite(rawMaxAgeDays) && rawMaxAgeDays > 0
+    ? rawMaxAgeDays
+    : 30;
   const cutoff = Date.now() - maxAgeDays * 24 * 60 * 60 * 1000;
 
   let entries;
