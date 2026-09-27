@@ -12,11 +12,40 @@ import { editImage, formatImageResult } from "./tools/drawImage.js";
 import { splitMessage }
   from "./utils/splitMessage.js";
 import { getDocumentReply, getImageReply } from "./utils/replyFiles.js";
+import { dataPath, dataRoot } from "./utils/dataDir.js";
 import { sanitizeFileName } from "./utils/fileNames.js";
 import { logError, logInfo } from "./utils/logger.js";
 import { describeRunningCode } from "./version.js";
 
 const agents = new Map();
+
+/**
+ * Пустой/незаданный список = бот отвечает всем, как и раньше — поведение по
+ * умолчанию не меняется. Заданный — отказ для остальных chatId ещё до входа
+ * в любой обработчик, тем же middleware для текста, voice, документов и
+ * кнопок сразу.
+ * @param {string|undefined} raw
+ * @returns {Set<string>|null}
+ */
+function parseAllowedChatIds(raw) {
+  const ids = String(raw || "")
+    .split(",")
+    .map(id => id.trim())
+    .filter(Boolean);
+
+  return ids.length > 0 ? new Set(ids) : null;
+}
+
+const ALLOWED_CHAT_IDS = parseAllowedChatIds(process.env.ALLOWED_CHAT_IDS);
+
+/**
+ * @param {string|number|undefined} chatId
+ * @returns {boolean}
+ */
+function isChatAllowed(chatId) {
+  return !ALLOWED_CHAT_IDS || ALLOWED_CHAT_IDS.has(String(chatId));
+}
+
 const GUIDE_FILE_PATH = process.env.GUIDE_FILE_PATH || (
   process.platform === "win32"
     ? "D:/telegram excel/Справка — команды Telegram Excel.txt"
@@ -661,8 +690,7 @@ async function handleDocumentMessage(ctx) {
 
   try {
     const fileBuffer = await downloadTelegramFile(document.file_id, ctx);
-    const uploadDir = path.resolve(
-      process.cwd(),
+    const uploadDir = dataPath(
       "data",
       "telegram",
       String(chatId || "default")
@@ -675,8 +703,11 @@ async function handleDocumentMessage(ctx) {
     });
     fs.writeFileSync(filePath, new Uint8Array(fileBuffer));
 
+    // Тот же корень, что reader.js использует для resolveProjectPath —
+    // иначе относительный путь, который агент запомнит и покажет здесь,
+    // не совпадёт с тем, что Excel-модуль потом ищет при DATA_DIR != cwd.
     const projectPath = path
-      .relative(process.cwd(), filePath)
+      .relative(dataRoot(), filePath)
       .split(path.sep)
       .join("/");
 
@@ -941,6 +972,17 @@ export async function startTelegramBot() {
   }
 
   const bot = new Telegraf(token);
+
+  if (ALLOWED_CHAT_IDS) {
+    bot.use(async (ctx, next) => {
+      if (isChatAllowed(ctx.chat?.id)) {
+        return next();
+      }
+
+      logInfo(`Отклонён chatId вне ALLOWED_CHAT_IDS: ${ctx.chat?.id}`);
+      await ctx.reply("Этот бот приватный и не отвечает посторонним.").catch(() => {});
+    });
+  }
 
   process.once("SIGINT", () => bot.stop("SIGINT"));
   process.once("SIGTERM", () => bot.stop("SIGTERM"));
