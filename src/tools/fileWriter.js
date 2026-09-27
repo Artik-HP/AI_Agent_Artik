@@ -12,8 +12,12 @@ export async function writeFileTool(input) {
 
   const fullPath = path.resolve(SAFE_ROOT, filePath);
 
-  if (!fullPath.startsWith(SAFE_ROOT)) {
+  if (fullPath !== SAFE_ROOT && !fullPath.startsWith(SAFE_ROOT + path.sep)) {
     return "Нельзя писать файлы вне проекта.";
+  }
+
+  if (/^\.env(\..*)?$/i.test(path.basename(fullPath))) {
+    return "Нельзя перезаписывать файлы с переменными окружения (.env*) — там секреты.";
   }
 
   fs.mkdirSync(path.dirname(fullPath), {

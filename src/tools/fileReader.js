@@ -28,8 +28,12 @@ export async function readFileTool(filePath) {
 
   const fullPath = path.resolve(SAFE_ROOT, normalizedPath);
 
-  if (!fullPath.startsWith(SAFE_ROOT)) {
+  if (fullPath !== SAFE_ROOT && !fullPath.startsWith(SAFE_ROOT + path.sep)) {
     return "Нельзя читать файлы вне проекта.";
+  }
+
+  if (/^\.env(\..*)?$/i.test(path.basename(fullPath))) {
+    return "Нельзя читать файлы с переменными окружения (.env*) — там секреты.";
   }
 
   if (!fs.existsSync(fullPath)) {

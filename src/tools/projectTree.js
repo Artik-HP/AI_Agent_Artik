@@ -39,7 +39,7 @@ export default {
     const root = process.cwd();
     const target = path.resolve(root, input || ".");
 
-    if (!target.startsWith(root)) {
+    if (target !== root && !target.startsWith(root + path.sep)) {
       return "Нельзя смотреть папки вне проекта.";
     }
 
