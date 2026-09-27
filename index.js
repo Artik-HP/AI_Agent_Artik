@@ -10,6 +10,7 @@ import {
   closeDatabase,
   initDatabase
 } from "./src/database.js";
+import { assertDataDirWritable } from "./src/utils/dataDir.js";
 import { installCrashHandlers, logError, logInfo } from "./src/utils/logger.js";
 
 // Ставим до всего остального: падение на старте тоже должно оставить след.
@@ -121,6 +122,17 @@ async function runCli() {
  * @param {unknown} error
  * @returns {string}
  */
+
+// Синхронно и до HTTP-листенера ниже: async main().catch() только
+// выставляет process.exitCode, а модуль продолжает выполняться дальше —
+// webApp.listen() поднялся бы всё равно, и /health отвечал бы "жив" при
+// нерабочем DATA_DIR. Явный process.exit(1) не оставляет такого зомби.
+try {
+  assertDataDirWritable();
+} catch (error) {
+  logError("DATA_DIR недоступен для записи, выходим:", error);
+  process.exit(1);
+}
 
 main().catch(error => {
   logError("Ошибка запуска:", error);

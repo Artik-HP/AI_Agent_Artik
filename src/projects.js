@@ -5,6 +5,7 @@ import {
   isDatabaseConfigured,
   dbQuery
 } from "./database.js";
+import { dataPath, dataRoot } from "./utils/dataDir.js";
 
 /**
  * @typedef {Object} ProjectTask
@@ -26,7 +27,8 @@ import {
  * @typedef {Object<string, Project[]>} ProjectStore
  */
 
-const PROJECTS_FILE = "projects.json";
+// Файловый fallback (без DATABASE_URL) — на DATA_DIR, см. utils/dataDir.js.
+const PROJECTS_FILE = dataPath("projects.json");
 const DEFAULT_STATUS = "новый";
 
 /** @type {ProjectStore} */
@@ -52,6 +54,7 @@ function load() {
 }
 
 function persistFile() {
+  fs.mkdirSync(dataRoot(), { recursive: true });
   fs.writeFileSync(
     PROJECTS_FILE,
     JSON.stringify(store, null, 2),

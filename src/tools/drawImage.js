@@ -3,9 +3,14 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 
 import { askModelForImage } from "../model.js";
+import { dataPath } from "../utils/dataDir.js";
 
-/** Каталог, куда сохраняются сгенерированные и отредактированные картинки. */
-const OUTPUT_DIR = "exports";
+/**
+ * Каталог, куда сохраняются сгенерированные и отредактированные картинки —
+ * тот же exports/ на DATA_DIR, что и excel/shared.js OUTPUT_DIR (независимая
+ * константа с тем же именем и значением, не общий импорт).
+ */
+const OUTPUT_DIR = dataPath("exports");
 
 /**
  * @typedef {Object} ImageResult

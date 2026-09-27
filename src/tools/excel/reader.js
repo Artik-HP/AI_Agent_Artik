@@ -3,7 +3,14 @@ import path from "node:path";
 
 import xlsx from "xlsx";
 
-const PROJECT_ROOT = path.resolve(process.cwd());
+import { dataRoot } from "../../utils/dataDir.js";
+
+// Раньше здесь был process.cwd() под именем PROJECT_ROOT — путали с
+// одноимённой константой в codeAnalyzer.js/version.js, которая про КОД, а не
+// про данные. Это разные корни: таблицы (загрузки, отчёты) переезжают на
+// DATA_DIR, а код по-прежнему читается из process.cwd() — иначе анализатор
+// кодовой базы начал бы смотреть не туда.
+const DATA_ROOT = dataRoot();
 const DEFAULT_DATA_DIR = "data";
 const MAX_ROWS_PER_SHEET = 10000;
 const MAX_SCANNED_FILES = 500;
@@ -58,7 +65,7 @@ export function isSpreadsheetFile(filePath) {
  * @returns {boolean}
  */
 function isInsideProject(fullPath) {
-  const normalizedRoot = PROJECT_ROOT.toLowerCase();
+  const normalizedRoot = DATA_ROOT.toLowerCase();
   const normalizedPath = path.resolve(fullPath).toLowerCase();
   const rootWithSeparator = normalizedRoot.endsWith(path.sep)
     ? normalizedRoot
@@ -79,7 +86,7 @@ export function resolveProjectPath(filePath) {
     throw new Error("Укажи путь к Excel или CSV-файлу.");
   }
 
-  const fullPath = path.resolve(PROJECT_ROOT, normalizedPath);
+  const fullPath = path.resolve(DATA_ROOT, normalizedPath);
 
   if (!isInsideProject(fullPath)) {
     throw new Error("Нельзя читать таблицы вне проекта.");
@@ -94,7 +101,7 @@ export function resolveProjectPath(filePath) {
  */
 export function toProjectPath(fullPath) {
   return path
-    .relative(PROJECT_ROOT, fullPath)
+    .relative(DATA_ROOT, fullPath)
     .split(path.sep)
     .join("/");
 }

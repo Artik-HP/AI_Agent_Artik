@@ -5,6 +5,7 @@ import {
     isDatabaseConfigured,
     dbQuery
 } from "./database.js";
+import { dataPath, dataRoot } from "./utils/dataDir.js";
 /**
  * @typedef {Object<string, string[]>} MemoryStore
  */
@@ -42,7 +43,9 @@ import {
  * @property {string} [filePath]
  */
 
-const MEMORY_FILE = "memory.json";
+// Файловый fallback (без DATABASE_URL) — на DATA_DIR, чтобы пережить
+// пересборку кода при деплое, как и загрузки/exports.
+const MEMORY_FILE = dataPath("memory.json");
 
 /** @type {MemoryStore} */
 let store = load();
@@ -70,6 +73,9 @@ function load() {
  * @returns {void}
  */
 function persistFile() {
+  // DATA_DIR может указывать на ещё не созданную директорию на свежем диске —
+  // без этого первая же запись падала бы с ENOENT.
+  fs.mkdirSync(dataRoot(), { recursive: true });
   fs.writeFileSync(
     MEMORY_FILE,
     JSON.stringify(store, null, 2),

@@ -7,9 +7,17 @@ import {
   sortByRecency
 } from "./reader.js";
 import { normalizePointCode } from "./points.js";
+import { dataPath } from "../../utils/dataDir.js";
 
-/** Каталог, куда складываются все сформированные ботом книги. */
-export const OUTPUT_DIR = "exports";
+/**
+ * Каталог, куда складываются все сформированные ботом книги — уже
+ * абсолютный путь на DATA_DIR. Модули, которые оборачивают его в
+ * path.resolve(process.cwd(), OUTPUT_DIR) (salesOrder.js, writer.js,
+ * transferBuilder.js, sheets.js), менять не пришлось: path.resolve
+ * останавливается на первом абсолютном аргументе справа, так что
+ * process.cwd() там уже ни на что не влияет.
+ */
+export const OUTPUT_DIR = dataPath("exports");
 
 /** Корень пользовательских загрузок: внутри — по каталогу на каждый чат. */
 const TELEGRAM_DIR = "data/telegram";
