@@ -4,6 +4,7 @@ import path from "node:path";
 import { Markup, Telegraf } from "telegraf";
 import Agent from "./agent.js";
 import * as memory from "./memory.js";
+import { isRegistered, registerUser } from "./botUsers.js";
 import {
   detectAudioFormat,
   transcribeAudio
@@ -39,11 +40,40 @@ function parseAllowedChatIds(raw) {
 const ALLOWED_CHAT_IDS = parseAllowedChatIds(process.env.ALLOWED_CHAT_IDS);
 
 /**
+ * Код регистрации из .env. Если задан, бот закрыт по умолчанию: доступ есть
+ * только у ALLOWED_CHAT_IDS (статический список) и у тех, кто прислал верный
+ * код через /start (динамический список в bot_users, см. botUsers.js). Если
+ * не задан — регистрация выключена, доступ решает только ALLOWED_CHAT_IDS
+ * (пусто = отвечает всем, как и было раньше).
+ */
+const REGISTRATION_CODE = String(process.env.REGISTRATION_CODE || "").trim() || null;
+
+/**
  * @param {string|number|undefined} chatId
+ * @returns {Promise<boolean>}
+ */
+async function isChatAllowed(chatId) {
+  if (!REGISTRATION_CODE) {
+    return !ALLOWED_CHAT_IDS || ALLOWED_CHAT_IDS.has(String(chatId));
+  }
+
+  if (ALLOWED_CHAT_IDS && ALLOWED_CHAT_IDS.has(String(chatId))) {
+    return true;
+  }
+
+  return await isRegistered(chatId);
+}
+
+/**
+ * /start пропускаем мимо проверки доступа всегда: иначе незарегистрированный
+ * человек не смог бы дойти до обработчика, который проверяет код.
+ * @param {import("telegraf").Context} ctx
  * @returns {boolean}
  */
-function isChatAllowed(chatId) {
-  return !ALLOWED_CHAT_IDS || ALLOWED_CHAT_IDS.has(String(chatId));
+function isStartCommand(ctx) {
+  const text = ctx.message && "text" in ctx.message ? ctx.message.text : undefined;
+
+  return typeof text === "string" && /^\/start(?:@\S+)?(?:\s|$)/i.test(text.trim());
 }
 
 const GUIDE_FILE_PATH = process.env.GUIDE_FILE_PATH || (
@@ -388,11 +418,6 @@ function getAgent(chatId) {
 async function replyInParts(ctx, answer) {
   const parts = splitMessage(answer, 3900);
 
-  console.log(
-    "PARTS:",
-    parts.length
-  );
-
   for (const [index, part] of parts.entries()) {
     if (index === 0) {
       await ctx.reply(part, MAIN_KEYBOARD);
@@ -493,7 +518,7 @@ async function replyAgentAnswer(ctx, answer) {
       }
     );
   } catch (error) {
-    console.error("Telegram image reply error:", error);
+    logError("Telegram image reply error:", error);
     await replyInParts(ctx, answer);
   }
 }
@@ -521,8 +546,6 @@ async function downloadTelegramFile(fileId, ctx) {
  * @param {import("telegraf").Context} ctx
  */
 async function handleTextMessage(ctx) {
-  console.log("TEXT FROM TELEGRAM:", ctx.message && 'text' in ctx.message ? ctx.message.text : undefined);
-  console.log("CHAT ID:", ctx.chat?.id);
   const chatId = ctx.chat?.id;
   const userText = normalizeTelegramText((ctx.message && 'text' in ctx.message ? ctx.message.text : undefined) ?? "");
 
@@ -595,7 +618,6 @@ async function handleTextMessage(ctx) {
     const agent = getAgent(chatId);
     const answer = await agent.process(userText);
 
-    console.log("ANSWER LENGTH:", answer.length);
     await replyAgentAnswer(ctx, answer);
   } catch (error) {
     await handleTelegramError(ctx, error);
@@ -652,8 +674,6 @@ async function handleSpeechMessage(ctx) {
       format: detectAudioFormat(audio.mime_type, 'file_name' in audio && typeof audio.file_name === 'string' ? audio.file_name : undefined),
       language: process.env.OPENROUTER_STT_LANGUAGE || process.env.STT_LANGUAGE
     });
-
-    console.log("VOICE TRANSCRIPT:", text);
 
     const agent = getAgent(chatId);
     const answer = await agent.process(text);
@@ -947,7 +967,7 @@ async function registerBotCommands(bot) {
   try {
     await bot.telegram.setMyCommands(BOT_COMMANDS);
 
-    console.log(
+    logInfo(
       "Меню команд зарегистрировано:",
       BOT_COMMANDS.length
     );
@@ -955,12 +975,30 @@ async function registerBotCommands(bot) {
     const message =
       error instanceof Error ? error.message : String(error);
 
-    console.error(
+    logError(
       "Не удалось зарегистрировать меню команд:",
       message
     );
   }
 }
+
+const WELCOME_MESSAGE = [
+  "<b>Привет! Я AI Agent Artik 🤖</b>",
+  "",
+  "Персональный AI-агент: обычный чат с памятью, Excel/CSV-аналитика, " +
+    "веб-поиск с разбором ответа и рисование/редактирование картинок — " +
+    "всё в одном Telegram-боте.",
+  "",
+  "<b>Быстрый старт:</b>",
+  "🎨 «нарисуй дракона в горах» — сгенерирую картинку; ответь на неё " +
+    "текстом, чтобы поправить результат",
+  "🌐 кнопка «Веб-поиск» ниже — поиск в интернете с разбором ответа",
+  "📊 пришли Excel/CSV-файл — открою меню отчётов и заказа поставщику",
+  "🖥 кнопка «Веб-версия» ниже — тот же агент в браузере",
+  "💬 всё остальное — обычный вопрос, отвечу как ассистент",
+  "",
+  "/commands — полный список команд"
+].join("\n");
 
 export async function startTelegramBot() {
   const token = process.env.TELEGRAM_BOT_TOKEN;
@@ -973,44 +1011,77 @@ export async function startTelegramBot() {
 
   const bot = new Telegraf(token);
 
-  if (ALLOWED_CHAT_IDS) {
+  // ALLOWED_CHAT_IDS без REGISTRATION_CODE — старое поведение: пусто =
+  // middleware вообще не регистрируем, отвечаем всем. Как только задан
+  // REGISTRATION_CODE, бот закрыт по умолчанию, и проверка нужна всегда —
+  // поэтому middleware регистрируем без условия на ALLOWED_CHAT_IDS.
+  if (ALLOWED_CHAT_IDS || REGISTRATION_CODE) {
     bot.use(async (ctx, next) => {
-      if (isChatAllowed(ctx.chat?.id)) {
+      if (isStartCommand(ctx)) {
         return next();
       }
 
-      logInfo(`Отклонён chatId вне ALLOWED_CHAT_IDS: ${ctx.chat?.id}`);
-      await ctx.reply("Этот бот приватный и не отвечает посторонним.").catch(() => {});
+      let allowed;
+
+      try {
+        allowed = await isChatAllowed(ctx.chat?.id);
+      } catch (error) {
+        logError(`Ошибка проверки доступа для chatId ${ctx.chat?.id}:`, error);
+        return;
+      }
+
+      if (allowed) {
+        return next();
+      }
+
+      logInfo(`Отклонён незарегистрированный chatId: ${ctx.chat?.id}`);
+      await ctx.reply(
+        REGISTRATION_CODE
+          ? "Этот бот приватный. Напиши: /start код-регистрации."
+          : "Этот бот приватный и не отвечает посторонним."
+      ).catch(() => {});
     });
   }
 
   process.once("SIGINT", () => bot.stop("SIGINT"));
   process.once("SIGTERM", () => bot.stop("SIGTERM"));
 
-  bot.start(ctx => {
-    return ctx.reply(
-      [
-        "<b>Привет! Я AI Agent Artik 🤖</b>",
-        "",
-        "Персональный AI-агент: обычный чат с памятью, Excel/CSV-аналитика, " +
-          "веб-поиск с разбором ответа и рисование/редактирование картинок — " +
-          "всё в одном Telegram-боте.",
-        "",
-        "<b>Быстрый старт:</b>",
-        "🎨 «нарисуй дракона в горах» — сгенерирую картинку; ответь на неё " +
-          "текстом, чтобы поправить результат",
-        "🌐 кнопка «Веб-поиск» ниже — поиск в интернете с разбором ответа",
-        "📊 пришли Excel/CSV-файл — открою меню отчётов и заказа поставщику",
-        "🖥 кнопка «Веб-версия» ниже — тот же агент в браузере",
-        "💬 всё остальное — обычный вопрос, отвечу как ассистент",
-        "",
-        "/commands — полный список команд"
-      ].join("\n"),
-      {
+  bot.start(async ctx => {
+    const chatId = ctx.chat?.id;
+
+    try {
+      if (await isChatAllowed(chatId)) {
+        return await ctx.reply(WELCOME_MESSAGE, {
+          parse_mode: "HTML",
+          ...MAIN_KEYBOARD
+        });
+      }
+
+      if (!REGISTRATION_CODE) {
+        return await ctx.reply("Этот бот приватный и не отвечает посторонним.");
+      }
+
+      const text = "text" in ctx.message ? ctx.message.text : "";
+      const code = text.replace(/^\/start(?:@\S+)?\s*/i, "").trim();
+
+      if (!code) {
+        return await ctx.reply("Этот бот приватный. Напиши: /start код-регистрации.");
+      }
+
+      if (code !== REGISTRATION_CODE) {
+        return await ctx.reply("Код неверный.");
+      }
+
+      await registerUser(chatId, ctx.from?.username);
+      logInfo(`Зарегистрирован новый chatId по коду: ${chatId}`);
+
+      return await ctx.reply(`Код верный, доступ открыт.\n\n${WELCOME_MESSAGE}`, {
         parse_mode: "HTML",
         ...MAIN_KEYBOARD
-      }
-    );
+      });
+    } catch (error) {
+      await handleTelegramError(ctx, error);
+    }
   });
 
   bot.action(new RegExp(`^${CRITERIA_PREFIX}(.+)$`), handleCriteriaPresetAction);

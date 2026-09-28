@@ -23,7 +23,7 @@
 - CLI режим: npm start
 - Telegram режим: npm run telegram
 - Тесты: npm test
-- Линт (скрипт не задан): npx eslint .
+- Линт: npm run lint (или npx eslint .)
 
 ## Architecture Boundaries
 

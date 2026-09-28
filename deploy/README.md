@@ -56,6 +56,29 @@ sudo journalctl -u ai-agent-artik -n 80 --no-pager
 не подтверждает успешный polling. Убедись, что служба включена на автозапуск и после
 перезапуска службы бот снова отвечает. Затем проверь ответ при отключённом домашнем ПК.
 
+## Доступ к веб-интерфейсу через домен
+
+Для VPS создай у регистратора DNS-запись `A`: имя `@`, значение — публичный
+IPv4 сервера. Открой входящие порты `80` и `443` в firewall VPS/провайдера.
+После обновления DNS установи Nginx и Certbot, затем включи подготовленный
+reverse proxy:
+
+```sh
+sudo apt update
+sudo apt install -y nginx certbot python3-certbot-nginx
+sudo install -m 644 deploy/zoriopad.com.nginx.conf /etc/nginx/sites-available/ai-agent-artik
+sudo ln -s /etc/nginx/sites-available/ai-agent-artik /etc/nginx/sites-enabled/ai-agent-artik
+sudo nginx -t
+sudo systemctl reload nginx
+sudo certbot --nginx -d zoriopad.com --redirect
+```
+
+В `.env` на сервере задай `WEB_APP_URL=https://zoriopad.com`,
+`WEB_APP_USERNAME=artik` и свой `WEB_APP_PASSWORD`, затем перезапусти сервис.
+Production-веб-интерфейс без пароля закрыт; `/health` остаётся доступен
+проверке сервера. В конфигурации Nginx проксируй запросы на
+`http://127.0.0.1:10000`.
+
 Для возврата на ПК сначала останови службу сервера:
 
 ```sh

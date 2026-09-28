@@ -14,6 +14,9 @@ import { getDocumentReply, getImageReply } from "./utils/replyFiles.js";
 const SESSION_COOKIE = "artik_sid";
 const SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 30;
 const MAX_UPLOAD_BYTES = 15 * 1024 * 1024;
+const WEB_APP_URL = String(process.env.WEB_APP_URL || "").trim().replace(/\/+$/, "");
+const WEB_APP_USERNAME = String(process.env.WEB_APP_USERNAME || "artik");
+const WEB_APP_PASSWORD = String(process.env.WEB_APP_PASSWORD || "");
 const EXPORTS_DIR = path.resolve(process.cwd(), "exports");
 const UPLOAD_ROOT = path.resolve(process.cwd(), "data", "web");
 const PUBLIC_DIR = path.resolve(process.cwd(), "public");
@@ -125,6 +128,65 @@ export function createWebApp() {
   const app = express();
 
   app.disable("x-powered-by");
+
+  app.use((req, res, next) => {
+    if (req.path === "/health") {
+      next();
+      return;
+    }
+
+    if (WEB_APP_URL.startsWith("https://")) {
+      const forwardedProtocol = String(req.headers["x-forwarded-proto"] || "")
+        .split(",")[0]
+        .trim();
+      const protocol = forwardedProtocol || req.protocol;
+
+      if (protocol !== "https") {
+        res.redirect(308, `${WEB_APP_URL}${req.originalUrl}`);
+        return;
+      }
+    }
+
+    if (!WEB_APP_PASSWORD) {
+      if (process.env.NODE_ENV === "production") {
+        res.status(503).type("text/plain").send("Веб-интерфейс не настроен: задай WEB_APP_PASSWORD.");
+        return;
+      }
+
+      next();
+      return;
+    }
+
+    const authorization = String(req.headers.authorization || "");
+    const match = authorization.match(/^Basic\s+(.+)$/i);
+    let suppliedUsername = "";
+    let suppliedPassword = "";
+
+    if (match) {
+      const credentials = Buffer.from(match[1], "base64").toString("utf8");
+      const separatorIndex = credentials.indexOf(":");
+
+      if (separatorIndex >= 0) {
+        suppliedUsername = credentials.slice(0, separatorIndex);
+        suppliedPassword = credentials.slice(separatorIndex + 1);
+      }
+    }
+
+    const usernameMatches = suppliedUsername === WEB_APP_USERNAME;
+    const expectedPassword = Buffer.from(WEB_APP_PASSWORD);
+    const actualPassword = Buffer.from(suppliedPassword);
+    const passwordMatches = actualPassword.length === expectedPassword.length &&
+      crypto.timingSafeEqual(actualPassword, expectedPassword);
+
+    if (usernameMatches && passwordMatches) {
+      next();
+      return;
+    }
+
+    res.setHeader("WWW-Authenticate", 'Basic realm="AI Agent Artik", charset="UTF-8"');
+    res.status(401).type("text/plain").send("Нужен пароль для веб-интерфейса.");
+  });
+
   app.use(express.json({ limit: "20mb" }));
   app.use(express.static(PUBLIC_DIR));
 

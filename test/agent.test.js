@@ -8,6 +8,7 @@ import ExcelJS from "exceljs";
 import Agent, { shouldUseExcelTool, shouldUseProjectManager } from "../src/agent.js";
 import * as memory from "../src/memory.js";
 import * as projects from "../src/projects.js";
+import { isRegistered, registerUser, removeUser } from "../src/botUsers.js";
 import {
   CRITERIA_PRESETS,
   EXCEL_ACTIONS,
@@ -717,6 +718,23 @@ test("project manager tracks name, stack, status and tasks through a chat", asyn
   );
 
   await projects.clearProjects(chatId);
+});
+
+test("bot user registration remembers and forgets access", async () => {
+  const chatId = "999000111";
+
+  await removeUser(chatId);
+  assert.equal(await isRegistered(chatId), false);
+
+  await registerUser(chatId, "test_user");
+  assert.equal(await isRegistered(chatId), true);
+
+  // Повторная регистрация того же chatId не должна плодить дубли/ошибки.
+  await registerUser(chatId, "test_user_renamed");
+  assert.equal(await isRegistered(chatId), true);
+
+  await removeUser(chatId);
+  assert.equal(await isRegistered(chatId), false);
 });
 
 test("рабочие листы книги не становятся торговыми точками", async () => {

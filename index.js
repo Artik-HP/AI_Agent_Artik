@@ -46,7 +46,15 @@ function getErrorMessage(error) {
 }
 
 async function main() {
-  await initDatabase();
+  try {
+    await initDatabase();
+  } catch (error) {
+    // PostgreSQL недоступен при старте (Neon "холодный" пул, сетевой сбой) —
+    // не повод не запускать CLI/Telegram вовсе. shouldUseDatabase() в
+    // memory.js/projects.js сам повторит попытку на первом же обращении к
+    // памяти, а до тех пор бот просто работает без долговременной памяти.
+    logError("PostgreSQL недоступен при старте, продолжаем без него:", error);
+  }
 
   const isTelegramMode =
     process.argv.includes(TELEGRAM_FLAG);

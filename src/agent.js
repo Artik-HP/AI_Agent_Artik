@@ -557,26 +557,6 @@ constructor(chatId = "default") {
     .join("\n\n");
 }
 
-/**
- * @param {string|undefined} query
- * @returns {Promise<string>}
- */
-async searchWeb(query) {
-  // searchWeb — будущий настоящий интернет-поиск
-
-  if (!query) {
-    return "Напиши запрос. Например: /search-web новости OpenAI";
-  }
-
-  return [
-    "Интернет-поиск пока не подключён.",
-    "",
-    `Запрос: ${query}`,
-    "",
-    "Следующий шаг: подключить Brave Search API, Tavily или SerpAPI."
-  ].join("\n");
-}
-
   /**
    * @param {string|undefined} message
    * @returns {Promise<string>}
@@ -633,10 +613,6 @@ if (lower === "/context") {
     )
     .join("\n\n");
 }
-
-    if (lower === "/tools") {
-      return this.showTools();
-    }
 
     if (lower === "/context clear") {
       this.conversationHistory = [];
@@ -943,7 +919,6 @@ if (lower.startsWith("/write ")) {
 }
 
 const route = await chooseTool(text);
-    console.log("ROUTER:", route);
 
     if (route?.tool === "draw") {
       if (isDrawingDiscussion(lower)) {
@@ -974,9 +949,6 @@ if (route.tool === "excel") {
   };
 }
 const toolResult = await tool.run(toolInput);
-console.log("TOOL:", route.tool);
-console.log("INPUT:", toolInput);
-console.log("RESULT:", String(toolResult).slice(0, 500));
 
 if (route.tool === "draw" || route.tool === "excel" || route.tool === "projects") {
   return String(toolResult);
@@ -1009,7 +981,6 @@ return await analyzeResults(
    */
   async answerWithToolResult(userText, toolName, toolInput, toolResult) {
     const memories = await memory.getAll(this.chatId);
-    console.log("MEMORIES:", memories);
     const messages = [
       {
         role: "system",
@@ -1066,16 +1037,7 @@ let selectedModel =
         MODELS.coder ||
         selectedModel;
     }
-console.log(
-  "MODEL ROLE:",
-  this.currentAgent
-);
 
-console.log(
-  "PROMPT:",
-  AGENTS[this.currentAgent]
-    ?.slice(0, 200)
-);
     if (lower.startsWith("/architect")) {
       agentRole = AGENTS.architect;
       cleanText = text.replace("/architect", "").trim();
@@ -1119,13 +1081,6 @@ ${memories.join("\n")}`
         this.conversationHistory.slice(-100);
     }
     // оставляем последние 100 сообщений
-if (lower === "/context") {
-  return JSON.stringify(
-    this.conversationHistory,
-    null,
-    2
-  );
-}
     return answer;
   }
 
@@ -1248,21 +1203,6 @@ async search(query) {
     return "Запомнил: " + text;
   }
 
-async rememberName(text) {
-  const lower = text.toLowerCase();
-
-  if (
-    lower.startsWith("меня зовут ") ||
-    lower.startsWith("моё имя ") ||
-    lower.startsWith("мое имя ")
-  ) {
-    await memory.save(text, this.chatId);
-    return `Запомнил: ${text}`;
-  }
-
-  return null;
-}
-
   /**
    * @returns {string}
    */
@@ -1319,30 +1259,6 @@ async rememberName(text) {
 
     return `Удалил: ${value}`;
   }
-
-  /**
-   * @returns {string}
-   */
-  showTools() {
-  return [
-    "Доступные инструменты:",
-    "",
-    "/weather [город]",
-    "время",
-    "calc 2 + 2",
-    "/history",
-    "/context",
-    "/remember",
-    "/forget",
-    "/uuid",
-    "/random",
-    "/base64",
-    "/db",
-    "/codebase",
-    "/excel",
-    "/draw"
-  ].join("\n");
-}
 
   /**
    * @returns {string}

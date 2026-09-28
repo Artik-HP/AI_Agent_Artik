@@ -21,7 +21,6 @@ export async function searchYouTube(query) {
   url.searchParams.set("key", apiKey);
 
   const response = await fetch(url);
-  console.log("YouTube query:", normalizedQuery);
   const data = await response.json();
 
   if (!response.ok) {

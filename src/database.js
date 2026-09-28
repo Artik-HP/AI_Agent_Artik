@@ -196,16 +196,6 @@ export async function initDatabase() {
             logInfo("✅ PostgreSQL подключён.");
 
             await pool.query(`
-                CREATE TABLE IF NOT EXISTS messages (
-                id SERIAL PRIMARY KEY,
-                chat_id TEXT NOT NULL,
-                role TEXT NOT NULL,
-                text TEXT NOT NULL,
-                created_at TIMESTAMPTZ DEFAULT NOW()
-            );
-            `);
-
-            await pool.query(`
                 CREATE TABLE IF NOT EXISTS memories (
                 id SERIAL PRIMARY KEY,
                 chat_id TEXT NOT NULL,
@@ -246,6 +236,16 @@ export async function initDatabase() {
             await pool.query(`
                 CREATE INDEX IF NOT EXISTS projects_chat_idx
                 ON projects (chat_id, name);
+            `);
+
+            await pool.query(`
+                CREATE TABLE IF NOT EXISTS bot_users (
+                telegram_id BIGINT PRIMARY KEY,
+                username TEXT,
+                role TEXT NOT NULL DEFAULT 'user',
+                is_active BOOLEAN NOT NULL DEFAULT true,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            );
             `);
 
             await pool.query(`
@@ -294,31 +294,3 @@ export async function closeDatabase() {
     logInfo("🔌 PostgreSQL отключён.");
 }
 
-/**
- * @typedef {'user' | 'assistant' | 'system'} MessageRole
- */
-
-/**
- * @typedef {Object} Message
- * @property {number} id
- * @property {string} chat_id
- * @property {MessageRole} role
- * @property {string} text
- * @property {Date} created_at
- */
-
-/**
- * @param {string} chatId
- * @param {MessageRole} role
- * @param {string} text
- * @returns {Promise<import('pg').QueryResult<Message>>}
- */
-export async function saveMessage(chatId, role, text) {
-    return dbQuery(
-        `
-        INSERT INTO messages (chat_id, role, text)
-        VALUES ($1, $2, $3)
-        `,
-        [chatId, role, text]
-    );
-}

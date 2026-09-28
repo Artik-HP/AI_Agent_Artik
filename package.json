@@ -6,9 +6,11 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
+    "dev": "nodemon index.js",
     "telegram": "node index.js --telegram",
     "start:24x7": "node index.js --telegram",
-    "test": "node --test"
+    "test": "node --test",
+    "lint": "eslint ."
   },
   "keywords": [],
   "author": "",

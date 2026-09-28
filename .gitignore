@@ -26,6 +26,7 @@ build/
 
 memory.json
 projects.json
+bot_users.json
 # бэкапы пула файлов (Excel пользователя, не код)
 backup/
 
