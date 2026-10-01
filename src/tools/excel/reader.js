@@ -468,6 +468,17 @@ export function looksLikeSectionRow(row) {
     return false;
   }
 
+  // У магазина без движений даже строка итога бывает полностью пустой.
+  // Явное имя точки всё равно начинает новый блок, иначе её товары
+  // приписываются предыдущему магазину (например «Toppers Інстаграм»).
+  const namedEmptyPoint =
+    /^(?:toppers|топперс|хохо|xoxo)(?:\s|$)/iu.test(first) ||
+    /^[ТTХXтtхx]\s*-?\s*\d{1,3}$/.test(first);
+
+  if (namedEmptyPoint && cells.slice(2).every(cell => String(cell ?? "").trim() === "")) {
+    return true;
+  }
+
   return cells.slice(2).some(cell => {
     const text = String(cell ?? "").replace(/\s/g, "").replace(",", ".");
 

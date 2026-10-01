@@ -18,6 +18,7 @@ import { describeRunningCode } from "./version.js";
 import { getDatabaseStatus } from "./database.js";
 import { hasSheetIntent } from "./tools/excel/sheets.js";
 import { shouldEditExcel } from "./tools/excel/excelTool.js";
+import { shouldTransferOpeningStock } from "./tools/excel/openingStockTransfer.js";
 import { drawImage, editImage, formatImageResult } from "./tools/drawImage.js";
 const MODELS = {
   default: process.env.MODEL_DEFAULT,
@@ -88,6 +89,7 @@ export function shouldUseExcelTool(lower) {
     lower.startsWith("/excel ") ||
     lower === "/purchase-order" ||
     lower.startsWith("/purchase-order ") ||
+    shouldTransferOpeningStock(lower) ||
     lower.includes("замовлення") ||
     lower.includes("заказ т1") ||
     lower.includes("заказ t1") ||
@@ -483,7 +485,8 @@ const HELP_SECTIONS = [
   {
     title: "📊 Excel/CSV",
     lines: [
-      "/excel — справка по модулю: поиск, аналитика, заказ, редактирование"
+      "/excel — справка по модулю: поиск, аналитика, заказ, редактирование",
+      "/excel перенос из начала — план перемещения товаров без розничных продаж в магазины с пустым Концом"
     ]
   },
   {

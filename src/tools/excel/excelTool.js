@@ -36,6 +36,11 @@ import {
   formatCriteriaTransferResult
 } from "./transferByCriteria.js";
 import {
+  buildOpeningStockTransfer,
+  formatOpeningStockTransferResult,
+  shouldTransferOpeningStock
+} from "./openingStockTransfer.js";
+import {
   buildTransferFromText,
   buildTransferTemplate,
   formatTemplateResult,
@@ -77,6 +82,15 @@ const HELP_TEXT = [
   "Несколько сразу: «перенеси с Т1 где остаток>10 реализация<40%».",
   "Знаки: < > <= >= = или словами «меньше», «больше».",
   "",
+  "📦 ПЕРЕНОС ИЗ НАЧАЛА БЕЗ РОЗНИЧНЫХ ПРОДАЖ",
+  "• перенеси из начала без розничных продаж туда, где конец пустой",
+  "• перенос из начала / перемещение из начала — короткие команды",
+  "Отправитель: Начало > 0, розничные продажи пусто/0, Конец > 0.",
+  "Количество: меньшее из Начала и Конца, округлённое вниз до целых.",
+  "Получатели: есть строка товара и Конец именно пустой (не 0).",
+  "Количество делится поровну между такими магазинами, остаток — по 1 шт.",
+  "Результат — Excel-план перемещения; исходные остатки не меняются.",
+  "",
   "♻️ РАЗВЕЗТИ ПО ПРОДАЖАМ — с магазина, где не продаётся, туда, где продаётся",
   "• развези по продажам",
   "• перемещение по нулевым продажам",
@@ -112,7 +126,7 @@ const HELP_TEXT = [
   "ПРО ФАЙЛЫ",
   "Отчёты по разным точкам считаются вместе. Если одна точка есть в нескольких",
   "выгрузках, бот берёт самую свежую — иначе её продажи сложились бы дважды.",
-  "Все команды работают и на кнопках: пришли файл и выбери действие."
+  "Основные действия есть и на кнопках; перенос из начала запускается командой."
 ].join("\n");
 
 /**
@@ -375,6 +389,16 @@ export async function runExcelTool(input) {
       memories: request.memories,
       chatId: request.chatId
     });
+  }
+
+  if (shouldTransferOpeningStock(query)) {
+    const result = await buildOpeningStockTransfer({
+      query,
+      memories: request.memories,
+      chatId: request.chatId
+    });
+
+    return formatOpeningStockTransferResult(result);
   }
 
   if (shouldMoveByCriteria(lower)) {
