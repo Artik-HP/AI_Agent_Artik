@@ -17,6 +17,71 @@ delete process.env.DATABASE_URL;
 const HEADER = ["Місце зберігання", "", "Начало", "Приход", "Расход",
   "Отчет о розничных продажах", "Продажа покупателю", "Конец"];
 
+const STRICT_QUERY = "Перемести товары с Т2 на другие магазины. условие перемещай товары только которые имеют запись в колонке начало, товары которые имеют запись в колонке приход и отчет о розничных продажах не переносить. товары переносить в те магазины где колонка конец пустая.";
+
+test("strict opening transfer respects source, each forbidden cell and blank destination", async t => {
+  const dir = fixtureDirectory(t);
+  const file = path.join(dir, "strict.xlsx");
+  const rows = [
+    ["OK", "Товар", 6, null, 0, null, 0, 4],
+    ["RECEIPT", "Товар", 3, 1, 0, null, 0, 4],
+    ["RECEIPT-ZERO", "Товар", 3, 0, 0, null, 0, 3],
+    ["RETAIL", "Товар", 3, null, 0, 1, 0, 2],
+    ["RETAIL-ZERO", "Товар", 3, null, 0, 0, 0, 3],
+    ["BOTH", "Товар", 3, 1, 0, 1, 0, 3],
+    ["NO-START", "Товар", null, null, 0, null, 0, 3],
+    ["NO-STOCK", "Товар", 3, null, 0, null, 0, null]
+  ];
+  await writeReport(file, [
+    ["Toppers 02 Lviv Staroevreyska", rows],
+    ["Т1", rows.map(row => [row[0], "Товар", 8, null, 0, null, 0, 8])],
+    ["Т3", rows.map(row => [row[0], "Товар", 1, 2, 3, 3, 0, null])],
+    ["Т4", rows.map(row => [row[0], "Товар", 1, null, 0, null, 0, 0])]
+  ]);
+  assert.equal(shouldTransferOpeningStock(STRICT_QUERY), true);
+  const before = fs.readFileSync(file);
+  const result = await buildOpeningStockTransfer({ query: STRICT_QUERY, files: [file], outDir: dir });
+  assert.deepEqual(result.lines.map(({ from, to, sku, qty }) => ({ from, to, sku, qty })),
+    [{ from: "Т2", to: "Т3", sku: "OK", qty: 4 }]);
+  assert.equal(result.strictBlanks, true);
+  assert.deepEqual(fs.readFileSync(file), before);
+
+  // Оба интерфейса проходят через Agent: без LLM и без развозки по продажам.
+  t.mock.method(globalThis, "fetch", () => { throw new Error("Сеть не нужна"); });
+  for (const prefix of ["/excel ", ""]) {
+    const answer = await new Agent(`strict-${prefix.length}-${process.pid}`).process(`${prefix}${STRICT_QUERY} "${file}"`);
+    const output = answer.match(/^Excel-файл:\s*(.+\.xlsx)\s*$/m)?.[1];
+    assert.ok(output, answer);
+    t.after(() => {
+      assert.ok(path.resolve(output).startsWith(path.resolve("exports") + path.sep));
+      fs.rmSync(output, { force: true });
+    });
+    assert.match(answer, /Магазин-источник: Т2/);
+    const book = await new ExcelJS.Workbook().xlsx.readFile(output);
+    assert.deepEqual(book.getWorksheet("Перемещение").getRow(2).values.slice(1, 6),
+      ["Т2", "Т3", "OK", "Товар", 4]);
+    assert.equal(book.getWorksheet("Перемещение").rowCount, 2);
+  }
+
+  const missing = path.join(dir, "missing-receipt.xlsx");
+  await writeReport(missing, [
+    ["Т2", [["OK", "Товар", 4, 0, null, 0, 4]]],
+    ["Т3", [["OK", "Товар", 0, 0, null, 0, null]]]
+  ], HEADER.filter(header => header !== "Приход"));
+  const rejected = await buildOpeningStockTransfer({ query: STRICT_QUERY, files: [missing], outDir: dir });
+  assert.equal(rejected.status, "empty");
+  assert.match(rejected.notes.join(" "), /Приход/);
+
+  const similar = path.join(dir, "similar-headers.xlsx");
+  await writeReport(similar, [
+    ["Т2", [["OK", "Товар", 4, null, 0, null, 0, 4, 2]]],
+    ["Т3", [["OK", "Товар", 0, null, 0, null, 0, null, 0]]]
+  ], [...HEADER, "Оприходование запасов"]);
+  const matched = await buildOpeningStockTransfer({ query: STRICT_QUERY, files: [similar], outDir: dir });
+  assert.equal(matched.lines.length, 1);
+  assert.equal(matched.lines[0].qty, 4);
+});
+
 function fixtureDirectory(t) {
   const root = path.resolve("test");
   const dir = fs.mkdtempSync(path.join(root, ".tmp-opening-transfer-"));
@@ -177,7 +242,7 @@ test("an empty shop subtotal starts its own block instead of borrowing the previ
   assert.equal(result.stats.points, 2);
   assert.equal(result.lines.length, 1);
   assert.equal(result.lines[0].from, "Т1");
-  assert.equal(result.lines[0].to, "Toppers Інстаграм");
+  assert.equal(result.lines[0].to, "Т-ІНСТАГРАМ");
   assert.equal(result.lines[0].qty, 3);
 });
 

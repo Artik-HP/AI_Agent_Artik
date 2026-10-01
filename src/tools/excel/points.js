@@ -314,63 +314,64 @@ const ENUMERATION_STOP =
  */
 function findPointsAfter(query, preposition) {
   const text = String(query || "");
-  const match = preposition.exec(text);
+  const matcher = new RegExp(preposition.source, `${preposition.flags}g`);
+  let match;
 
-  if (!match) {
-    return [];
+  while ((match = matcher.exec(text))) {
+    /** @type {string[]} */
+    const codes = [];
+    const tokens = text
+      .slice(match.index + match[0].length)
+      .split(/[,;]+|\s+/)
+      .map(token => token.trim())
+      .filter(Boolean);
+    let at = 0;
+
+    while (at < tokens.length) {
+      // Следующий предлог или служебное слово закрывает перечисление. Без этой
+      // проверки «с Т1, Т7 на Т10» отдавало источниками и Т10: normalizePointCode
+      // сам срезает ведущее «на», и пара «на Т10» опознавалась как точка.
+      if (ENUMERATION_STOP.test(tokens[at])) {
+        break;
+      }
+
+      if (/^(?:и|та|and|\+|&)$/i.test(tokens[at])) {
+        at += 1;
+        continue;
+      }
+
+      // Сначала пара слов: «Toppers 1», «ХОХО 2» — точка называется двумя.
+      const pair = normalizePointCode(tokens.slice(at, at + 2).join(" "));
+
+      if (pair) {
+        codes.push(pair);
+        at += 2;
+        continue;
+      }
+
+      const single = normalizePointCode(tokens[at]);
+
+      if (single) {
+        codes.push(single);
+        at += 1;
+        continue;
+      }
+
+      // Перебираем следующие предлоги: в «из начала с Т2» слово «из» не
+      // задаёт магазин, но последующее «с Т2» задаёт его явно.
+      if (codes.length > 0 || at >= 1) {
+        break;
+      }
+
+      at += 1;
+    }
+
+    if (codes.length > 0) {
+      return [...new Set(codes)];
+    }
   }
 
-  /** @type {string[]} */
-  const codes = [];
-  const tokens = text
-    .slice(match.index + match[0].length)
-    .split(/[,;]+|\s+/)
-    .map(token => token.trim())
-    .filter(Boolean);
-  let at = 0;
-
-  while (at < tokens.length) {
-    // Следующий предлог или служебное слово закрывает перечисление. Без этой
-    // проверки «с Т1, Т7 на Т10» отдавало источниками и Т10: normalizePointCode
-    // сам срезает ведущее «на», и пара «на Т10» опознавалась как точка.
-    if (ENUMERATION_STOP.test(tokens[at])) {
-      break;
-    }
-
-    // Соединители перечисления пропускаем молча.
-    if (/^(?:и|та|and|\+|&)$/i.test(tokens[at])) {
-      at += 1;
-      continue;
-    }
-
-    // Сначала пара слов: «Toppers 1», «ХОХО 2» — точка называется двумя.
-    const pair = normalizePointCode(tokens.slice(at, at + 2).join(" "));
-
-    if (pair) {
-      codes.push(pair);
-      at += 2;
-      continue;
-    }
-
-    const single = normalizePointCode(tokens[at]);
-
-    if (single) {
-      codes.push(single);
-      at += 1;
-      continue;
-    }
-
-    // Первое слово, которое точкой не является, закрывает перечисление:
-    // «с Т1, Т7 где реализация<20%» — «где» уже не склад. Если не нашли
-    // ничего за первые два слова — предлог был не про склад вовсе.
-    if (codes.length > 0 || at >= 1) {
-      break;
-    }
-
-    at += 1;
-  }
-
-  return [...new Set(codes)];
+  return [];
 }
 
 /**

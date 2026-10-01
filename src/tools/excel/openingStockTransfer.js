@@ -1,6 +1,12 @@
 import { NORMALIZED_MOVEMENT_LABELS } from "./columns.js";
 import { normalizeSkuKey, readReportFile } from "./deadStock.js";
-import { comparePointCodes, normalizePointCode, pointName } from "./points.js";
+import {
+  comparePointCodes,
+  normalizePointCode,
+  parseDestinationPoints,
+  parseSourcePoints,
+  pointName
+} from "./points.js";
 import { normalizeHeader } from "./reader.js";
 import { parseNumber } from "./search.js";
 import {
@@ -18,6 +24,9 @@ import { writeReportWorkbook } from "./writer.js";
  * @property {Object[]} lines
  * @property {string|null} outputPath
  * @property {Object} stats
+ * @property {string[]} sourcePoints
+ * @property {string[]} destinationPoints
+ * @property {boolean} strictBlanks
  * @property {string[]} notes
  */
 
@@ -32,18 +41,23 @@ export function shouldTransferOpeningStock(query) {
   const transfer = /(?:^|\s)(?:перен[ео]с|перемест|перемещ|переміст|переміщ|развез|розвез)[\p{L}]*/u.test(text);
   const opening = /(?:^|\s)(?:из|с|со|з|зі)\s+(?:(?:столбца|колонки|колонці|стовпця)\s+)?(?:начал[ао]|початку|початок)(?:\s|$)/u.test(text);
 
-  return transfer && opening;
+  const openingColumn = /(?:колонк[\p{L}]*|столб[\p{L}]*|стовп[\p{L}]*)\s*[«"']?(?:начало|початок)(?=[\s,.;:»"']|$)/u.test(text);
+
+  return transfer && (opening || openingColumn);
 }
 
 /**
  * Числовые поля старого парсера не различают пустоту, ошибку и ноль.
  * Здесь читаем исходные ячейки и отдельно проверяем наличие заголовка.
  * @param {Record<string, string>} cells
- * @param {"start"|"retailSales"|"end"} field
+ * @param {"start"|"receipt"|"retailSales"|"end"} field
  * @returns {{ missing: boolean, invalid: boolean, blank: boolean, value: number|null }}
  */
 function readMovementCell(cells, field) {
-  const matches = Object.entries(cells).filter(([header]) => {
+  const exact = Object.entries(cells).filter(([header]) =>
+    NORMALIZED_MOVEMENT_LABELS[field].includes(normalizeHeader(header))
+  );
+  const matches = exact.length > 0 ? exact : Object.entries(cells).filter(([header]) => {
     const normalized = normalizeHeader(header);
 
     return NORMALIZED_MOVEMENT_LABELS[field].some(label =>
@@ -130,9 +144,17 @@ async function writeOpeningStockWorkbook(result, outDir) {
 export async function buildOpeningStockTransfer(input) {
   const request = normalizeInput(input);
   const files = resolveFiles(request);
+  const sourcePoints = parseSourcePoints(request.query);
+  const destinationPoints = parseDestinationPoints(request.query);
+  // Упоминание прихода включает строгий отбор по заполненности. Старый
+  // короткий режим «из начала» сохраняет прежнее правило пусто/0 продаж.
+  const strictBlanks = /приход|прихід/iu.test(request.query);
   const result = {
     status: "needs_file",
     files,
+    sourcePoints,
+    destinationPoints,
+    strictBlanks,
     lines: [],
     outputPath: null,
     stats: {
@@ -227,7 +249,9 @@ export async function buildOpeningStockTransfer(input) {
       const start = readMovementCell(entry.record.cells, "start");
       const retail = readMovementCell(entry.record.cells, "retailSales");
       const end = readMovementCell(entry.record.cells, "end");
+      const receipt = strictBlanks ? readMovementCell(entry.record.cells, "receipt") : null;
       const fields = [["Начало", start], ["Отчет о розничных продажах", retail], ["Конец", end]];
+      if (strictBlanks) fields.push(["Приход", receipt]);
 
       if (fields.some(([, cell]) => cell.missing)) {
         stats.missingColumns += 1;
@@ -240,15 +264,19 @@ export async function buildOpeningStockTransfer(input) {
         continue;
       }
 
-      stocks.push({ ...entry, start, retail, end });
+      stocks.push({ ...entry, start, retail, end, receipt });
     }
 
     const sources = stocks
-      .filter(stock => stock.start.value > 0 && stock.end.value > 0 &&
-        (stock.retail.blank || stock.retail.value === 0))
+      .filter(stock => (sourcePoints.length === 0 || sourcePoints.includes(stock.code)) &&
+        stock.start.value > 0 && stock.end.value > 0 &&
+        (strictBlanks
+          ? stock.receipt.blank && stock.retail.blank
+          : stock.retail.blank || stock.retail.value === 0))
       .sort((first, second) => comparePointCodes(first.code, second.code));
     const destinations = stocks
-      .filter(stock => stock.end.blank)
+      .filter(stock => stock.end.blank &&
+        (destinationPoints.length === 0 || destinationPoints.includes(stock.code)))
       .sort((first, second) => comparePointCodes(first.code, second.code));
     // Остаток округления передаётся следующему магазину. Указатель общий
     // для всех источников артикула: суммарная разница не превышает 1 шт.
@@ -290,7 +318,7 @@ export async function buildOpeningStockTransfer(input) {
           qty: quantities[index],
           sourceStart: source.start.value,
           sourceEnd: source.end.value,
-          sourceRetail: source.retail.value ?? 0,
+          sourceRetail: source.retail.value ?? (strictBlanks ? "" : 0),
           destEnd: "",
           fromName: pointName(source.code),
           toName: pointName(destination.code)
@@ -347,7 +375,11 @@ export function formatOpeningStockTransferResult(result) {
   }
 
   const rules = [
-    "Источник: «Начало» > 0, розничные продажи пусты или равны 0; количество — целая часть меньшего из «Начало» и «Конец».",
+    `Магазин-источник: ${result.sourcePoints.length > 0 ? result.sourcePoints.join(", ") : "все подходящие магазины"}.`,
+    `Магазин-получатель: ${result.destinationPoints.length > 0 ? result.destinationPoints.join(", ") : "все магазины с пустым «Конец»"}.`,
+    result.strictBlanks
+      ? "Источник: «Начало» > 0, «Приход» и «Отчет о розничных продажах» строго пустые. Любая запись, включая 0, запрещает перенос. Количество — целая часть меньшего из «Начало» и «Конец»."
+      : "Источник: «Начало» > 0, розничные продажи пусты или равны 0; количество — целая часть меньшего из «Начало» и «Конец».",
     "Получатель: у того же артикула есть строка с пустым «Конец». Числовой 0 и отсутствие строки не считаются пустой ячейкой.",
     "Товар распределяется поровну между подходящими магазинами; разница после округления — не более 1 шт. Дробный остаток остаётся у источника."
   ];
